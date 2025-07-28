@@ -128,7 +128,45 @@ plot_group_pcoa <- function(abund_mat, group_name, color, outdir) {
 plot_group_pcoa(oral_crohn_t, "Crohn-Oral", my_colors["Crohn-Oral"], outdir)
 plot_group_pcoa(fecal_crohn_t, "Crohn-Fecal", my_colors["Crohn-Fecal"], outdir)
 plot_group_pcoa(oral_healthy_t, "Healthy-Oral", my_colors["Healthy-Oral"], outdir)
+###########################
+# Read matched sample IDs
+matched_df <- read.csv("/Users/maryamesmaeili/Documents/Hanze/Internship/data/matched_sample_ids.csv", stringsAsFactors=FALSE)
+oral_ids  <- matched_df$Oral_col
+fecal_ids <- matched_df$Fecal_col
 
+# Check if these columns exist in your abundance data
+cat("Missing oral:", setdiff(oral_ids, colnames(oral_abund_crohn)), "\n")
+cat("Missing fecal:", setdiff(fecal_ids, colnames(fecal_abund_crohn)), "\n")
+
+# Subset the abundance tables (columns must match)
+oral_matched  <- oral_abund_crohn[, oral_ids]
+fecal_matched <- fecal_abund_crohn[, fecal_ids]
+
+# Double check the shape
+stopifnot(ncol(oral_matched) == ncol(fecal_matched))
+stopifnot(all(colnames(oral_matched) == oral_ids))
+stopifnot(all(colnames(fecal_matched) == fecal_ids))
+
+# Transpose for Procrustes (samples x taxa -> samples as rows)
+oral_matched_t  <- t(oral_matched)
+fecal_matched_t <- t(fecal_matched)
+
+# Run Procrustes analysis
+
+procrustes_res <- procrustes(oral_matched_t, fecal_matched_t, symmetric=TRUE)
+protest_res <- protest(oral_matched_t, fecal_matched_t)
+
+# Plot Procrustes
+png(file.path(outdir, "procrustes_oral_fecal_crohn.png"), width=800, height=600, res=120)
+plot(procrustes_res, kind=1, main=paste("Procrustes Analysis (Oral vs. Fecal Crohn)\np-value:", round(protest_res$signif,4)))
+dev.off()
+
+# Save statistical results
+sink(file.path(outdir, "procrustes_oral_fecal_crohn_stats.txt"))
+print(protest_res)
+sink()
+
+##########################
 ### PERMANOVA test for group difference
 sink(file.path(outdir, "permanova_braycurtis.txt"))
 group_factor <- factor(group_labels, levels = names(my_colors))
