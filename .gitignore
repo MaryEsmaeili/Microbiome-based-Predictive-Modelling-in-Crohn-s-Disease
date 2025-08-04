@@ -1,0 +1,7 @@
+# Ignore folders
+.snakemake/
+data/
+results/
+
+# Ignore the Miniconda installer
+Miniconda3-latest-MacOSX-arm64.sh

@@ -1,0 +1,89 @@
+
+rule all:
+    input:
+        "data/processed/matched_sample_ids.csv",
+        "data/filtered/oral_abund_crohn_filtered.csv",
+        "data/filtered/fecal_abund_crohn_filtered.csv",
+        "data/filtered/oral_abund_healthy_filtered.csv"
+
+rule preprocessing:
+    input:
+        metadata="data/Metadata_metagenomics.xlsx",
+        crohn="data/utrecht_metaphlan_merged.txt",
+        healthy="data/oral_only_results_metaphlan4.txt"
+    output:
+        oral="data/processed/oral_abund_crohn.csv",
+        fecal="data/processed/fecal_abund_crohn.csv",
+        healthy="data/processed/oral_abund_healthy.csv",
+        matched="data/processed/matched_sample_ids.csv"
+    script:
+        "scripts/preprocessing.py"
+
+
+rule filtering:
+    input:
+        oral="data/processed/oral_abund_crohn.csv",
+        fecal="data/processed/fecal_abund_crohn.csv",
+        healthy="data/processed/oral_abund_healthy.csv"
+    output:
+        oral="data/filtered/oral_abund_crohn_filtered.csv",
+        fecal="data/filtered/fecal_abund_crohn_filtered.csv",
+        healthy="data/filtered/oral_abund_healthy_filtered.csv"
+    params:
+        prevalence=0.2,
+        abundance=1.0
+    script:
+        "scripts/filtering.py"
+
+rule alpha_diversity:
+    input:
+        oral="data/filtered/oral_abund_crohn_filtered.csv",
+        fecal="data/filtered/fecal_abund_crohn_filtered.csv",
+        healthy="data/filtered/oral_abund_healthy_filtered.csv",
+        matched_ids="data/processed/matched_sample_ids.csv"
+    output:
+        oral="results/alpha_diversity/alpha_oral.csv",
+        fecal="results/alpha_diversity/alpha_fecal.csv",
+        healthy="results/alpha_diversity/alpha_healthy.csv"
+    script:
+        "scripts/alpha_diversity.py"
+
+rule beta_diversity:
+    input:
+        oral="data/filtered/oral_abund_crohn_filtered.csv",
+        fecal="data/filtered/fecal_abund_crohn_filtered.csv",
+        healthy="data/filtered/oral_abund_healthy_filtered.csv",
+        matched_ids="data/processed/matched_sample_ids.csv"
+    output:
+        "results/beta_diversity/pcoa_bray_oral_vs_healthy.png",
+        "results/beta_diversity/pcoa_jaccard_oral_vs_healthy.png",
+        "results/beta_diversity/pcoa_bray_oral_vs_fecal.png",
+        "results/beta_diversity/pcoa_jaccard_oral_vs_fecal.png",
+        "results/beta_diversity/pcoa_bray_allgroups.png",
+        "results/beta_diversity/pcoa_jaccard_allgroups.png",
+        "results/beta_diversity/beta_group_distances.csv",
+        "results/beta_diversity/beta_stats.txt"
+    shell:
+        """
+        Rscript scripts/beta_diversity.R \
+        {input.oral} {input.fecal} {input.healthy} {input.matched_ids} results/beta_diversity
+        """
+
+rule genus_comparison:
+    input:
+        oral_crohn="data/filtered/oral_abund_crohn_filtered.csv",
+        fecal_crohn="data/filtered/fecal_abund_crohn_filtered.csv",
+        oral_healthy="data/filtered/oral_abund_healthy_filtered.csv",
+        matched_ids="data/processed/matched_sample_ids.csv"
+    params:
+        outdir="results/genus_comparison"
+    output:
+        "results/genus_comparison/patient_matched_genus_presence.csv",
+        "results/genus_comparison/oral_crohn_vs_healthy_genera_comparison.csv",
+        "results/genus_comparison/genus_barplot_oral_crohn_vs_healthy.png",
+        "results/genus_comparison/stackedbar_matched_oral_genus.png"
+
+    script:
+        "scripts/genus_comparison.py"
+
+
