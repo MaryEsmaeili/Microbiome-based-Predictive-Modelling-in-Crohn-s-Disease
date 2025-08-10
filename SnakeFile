@@ -1,10 +1,80 @@
+configfile: "config.yaml"
 
 rule all:
     input:
+        # Old comparisons
+        "results/genus_comparison/stackedbar_top10_all_oral.png",
+        "results/genus_comparison/stackedbar_top10_oral_crohn.png",
+        "results/genus_comparison/stackedbar_top10_oral_healthy.png",
+        "results/genus_comparison/barplot_top10_oral_crohn_vs_healthy.png",
+        "results/genus_comparison/top10_all_oral.csv",
+        "results/genus_comparison/top10_oral_crohn.csv",
+        "results/genus_comparison/top10_oral_healthy.csv",
+        "results/genus_comparison/top10_compare_oral_crohn_vs_healthy.csv",
+        "results/species_comparison/stackedbar_top15_all_oral_species.png",
+        "results/species_comparison/stackedbar_top15_oral_crohn_species.png",
+        "results/species_comparison/stackedbar_top15_oral_healthy_species.png",
+        "results/species_comparison/barplot_top15_oral_crohn_vs_healthy_species.png",
+        "results/species_comparison/top15_all_oral_species.csv",
+        "results/species_comparison/top15_oral_crohn_species.csv",
+        "results/species_comparison/top15_oral_healthy_species.csv",
+        "results/species_comparison/top15_compare_oral_crohn_vs_healthy_species.csv",
+
+        # --- Preprocessing
+        "data/processed/oral_abund_crohn.csv",
+        "data/processed/fecal_abund_crohn.csv",
+        "data/processed/oral_abund_healthy.csv",
         "data/processed/matched_sample_ids.csv",
-        "data/filtered/oral_abund_crohn_filtered.csv",
-        "data/filtered/fecal_abund_crohn_filtered.csv",
-        "data/filtered/oral_abund_healthy_filtered.csv"
+
+        # --- Filtering
+        "data/filtered/oral_abund_crohn_filtered_normalized.csv",
+        "data/filtered/fecal_abund_crohn_filtered_normalized.csv",
+        "data/filtered/oral_abund_healthy_filtered_normalized.csv",
+        "results/filtering/filtering_report.txt",
+        "results/filtering/filtering_barplot_allgroups.png",
+
+        # --- Alpha diversity
+        "results/alpha_diversity/alpha_oral.csv",
+        "results/alpha_diversity/alpha_fecal.csv",
+        "results/alpha_diversity/alpha_healthy.csv",
+
+        # --- Beta diversity
+        "results/beta_diversity/pcoa_bray_oral_vs_healthy.png",
+        "results/beta_diversity/pcoa_jaccard_oral_vs_healthy.png",
+        "results/beta_diversity/pcoa_bray_oral_vs_fecal.png",
+        "results/beta_diversity/pcoa_jaccard_oral_vs_fecal.png",
+        "results/beta_diversity/pcoa_bray_allgroups.png",
+        "results/beta_diversity/pcoa_jaccard_allgroups.png",
+        "results/beta_diversity/beta_group_distances.csv",
+        "results/beta_diversity/beta_stats.txt",
+
+        # --- Species V2 
+        "results/species_comparisonV2/stackedbar_top15_oral_crohn_species.png",
+        "results/species_comparisonV2/top15_oral_crohn_species.csv",
+        "results/species_comparisonV2/stackedbar_top15_oral_healthy_species.png",
+        "results/species_comparisonV2/top15_oral_healthy_species.csv",
+        "results/species_comparisonV2/stackedbar_top15_fecal_crohn_species.png",
+        "results/species_comparisonV2/top15_fecal_crohn_species.csv",
+        "results/species_comparisonV2/heatmap_pairs_crohn_species.png",
+        "results/species_comparisonV2/heatmap_group_contrast_species.png",
+        "results/species_comparisonV2/group_means_and_deltas_species.csv",
+        "results/species_comparisonV2/barplot_mean_species.png",
+        "results/species_comparisonV2/means_and_mean_species.csv",
+        "results/species_comparisonV2/barplot_oral_species_top15.png",   # NEW
+
+        # --- Genus V2 
+        "results/genus_comparisonV2/stackedbar_top10_oral_crohn.png",
+        "results/genus_comparisonV2/heatmap_pairs_crohn_genus.png",
+        "results/genus_comparisonV2/heatmap_group_contrast_genus.png",
+        "results/genus_comparisonV2/group_means_and_deltas_genus.csv",
+        "results/genus_comparisonV2/top10_oral_crohn.csv",
+        "results/genus_comparisonV2/stackedbar_top10_oral_healthy.png",
+        "results/genus_comparisonV2/top10_oral_healthy.csv",
+        "results/genus_comparisonV2/stackedbar_top10_fecal_crohn.png",
+        "results/genus_comparisonV2/top10_fecal_crohn.csv",
+        "results/genus_comparisonV2/barplot_mean_genus.png",
+        "results/genus_comparisonV2/means_and_mean_genus.csv",
+        "results/genus_comparisonV2/barplot_oral_genus_top10.png"        # NEW
 
 rule preprocessing:
     input:
@@ -19,27 +89,64 @@ rule preprocessing:
     script:
         "scripts/preprocessing.py"
 
-
 rule filtering:
     input:
         oral="data/processed/oral_abund_crohn.csv",
         fecal="data/processed/fecal_abund_crohn.csv",
         healthy="data/processed/oral_abund_healthy.csv"
     output:
-        oral="data/filtered/oral_abund_crohn_filtered.csv",
-        fecal="data/filtered/fecal_abund_crohn_filtered.csv",
-        healthy="data/filtered/oral_abund_healthy_filtered.csv"
+        oral="data/filtered/oral_abund_crohn_filtered_normalized.csv",
+        fecal="data/filtered/fecal_abund_crohn_filtered_normalized.csv",
+        healthy="data/filtered/oral_abund_healthy_filtered_normalized.csv",
+        report="results/filtering/filtering_report.txt",
+        barplot="results/filtering/filtering_barplot_allgroups.png"
     params:
         prevalence=0.2,
-        abundance=1.0
+        abundance=0.01
     script:
         "scripts/filtering.py"
 
+rule genus_comparison:
+    input:
+        oral_crohn="data/filtered/oral_abund_crohn_filtered_normalized.csv",
+        oral_healthy="data/filtered/oral_abund_healthy_filtered_normalized.csv"
+    params:
+        outdir="results/genus_comparison"
+    output:
+        "results/genus_comparison/stackedbar_top10_all_oral.png",
+        "results/genus_comparison/stackedbar_top10_oral_crohn.png",
+        "results/genus_comparison/stackedbar_top10_oral_healthy.png",
+        "results/genus_comparison/barplot_top10_oral_crohn_vs_healthy.png",
+        "results/genus_comparison/top10_all_oral.csv",
+        "results/genus_comparison/top10_oral_crohn.csv",
+        "results/genus_comparison/top10_oral_healthy.csv",
+        "results/genus_comparison/top10_compare_oral_crohn_vs_healthy.csv"
+    script:
+        "scripts/genus_comparison.py"
+
+rule species_comparison:
+    input:
+        oral_crohn="data/filtered/oral_abund_crohn_filtered_normalized.csv",
+        oral_healthy="data/filtered/oral_abund_healthy_filtered_normalized.csv"
+    params:
+        outdir="results/species_comparison"
+    output:
+        "results/species_comparison/stackedbar_top15_all_oral_species.png",
+        "results/species_comparison/stackedbar_top15_oral_crohn_species.png",
+        "results/species_comparison/stackedbar_top15_oral_healthy_species.png",
+        "results/species_comparison/barplot_top15_oral_crohn_vs_healthy_species.png",
+        "results/species_comparison/top15_all_oral_species.csv",
+        "results/species_comparison/top15_oral_crohn_species.csv",
+        "results/species_comparison/top15_oral_healthy_species.csv",
+        "results/species_comparison/top15_compare_oral_crohn_vs_healthy_species.csv"
+    script:
+        "scripts/species_comparison.py"
+
 rule alpha_diversity:
     input:
-        oral="data/filtered/oral_abund_crohn_filtered.csv",
-        fecal="data/filtered/fecal_abund_crohn_filtered.csv",
-        healthy="data/filtered/oral_abund_healthy_filtered.csv",
+        oral_crohn="data/filtered/oral_abund_crohn_filtered_normalized.csv",
+        fecal_crohn="data/filtered/fecal_abund_crohn_filtered_normalized.csv",
+        oral_healthy="data/filtered/oral_abund_healthy_filtered_normalized.csv",
         matched_ids="data/processed/matched_sample_ids.csv"
     output:
         oral="results/alpha_diversity/alpha_oral.csv",
@@ -50,9 +157,9 @@ rule alpha_diversity:
 
 rule beta_diversity:
     input:
-        oral="data/filtered/oral_abund_crohn_filtered.csv",
-        fecal="data/filtered/fecal_abund_crohn_filtered.csv",
-        healthy="data/filtered/oral_abund_healthy_filtered.csv",
+        oral_crohn="data/filtered/oral_abund_crohn_filtered_normalized.csv",
+        fecal_crohn="data/filtered/fecal_abund_crohn_filtered_normalized.csv",
+        oral_healthy="data/filtered/oral_abund_healthy_filtered_normalized.csv",
         matched_ids="data/processed/matched_sample_ids.csv"
     output:
         "results/beta_diversity/pcoa_bray_oral_vs_healthy.png",
@@ -66,24 +173,73 @@ rule beta_diversity:
     shell:
         """
         Rscript scripts/beta_diversity.R \
-        {input.oral} {input.fecal} {input.healthy} {input.matched_ids} results/beta_diversity
+        {input.oral_crohn} {input.fecal_crohn} {input.oral_healthy} {input.matched_ids} results/beta_diversity
         """
 
-rule genus_comparison:
+############################################
+# Species (Top 15) + Δ(OC−FC) & Δ(OC−OH)
+############################################
+rule species_comparisonV2:
     input:
-        oral_crohn="data/filtered/oral_abund_crohn_filtered.csv",
-        fecal_crohn="data/filtered/fecal_abund_crohn_filtered.csv",
-        oral_healthy="data/filtered/oral_abund_healthy_filtered.csv",
-        matched_ids="data/processed/matched_sample_ids.csv"
+        oral_crohn="data/filtered/oral_abund_crohn_filtered_normalized.csv",
+        oral_healthy="data/filtered/oral_abund_healthy_filtered_normalized.csv",
+        fecal_crohn="data/filtered/fecal_abund_crohn_filtered_normalized.csv"
     params:
-        outdir="results/genus_comparison"
+        outdir="results/species_comparisonV2"
     output:
-        "results/genus_comparison/patient_matched_genus_presence.csv",
-        "results/genus_comparison/oral_crohn_vs_healthy_genera_comparison.csv",
-        "results/genus_comparison/genus_barplot_oral_crohn_vs_healthy.png",
-        "results/genus_comparison/stackedbar_matched_oral_genus.png"
+        # per-group stacked bars + CSVs
+        "results/species_comparisonV2/stackedbar_top15_oral_crohn_species.png",
+        "results/species_comparisonV2/top15_oral_crohn_species.csv",
+        "results/species_comparisonV2/stackedbar_top15_oral_healthy_species.png",
+        "results/species_comparisonV2/top15_oral_healthy_species.csv",
+        "results/species_comparisonV2/stackedbar_top15_fecal_crohn_species.png",
+        "results/species_comparisonV2/top15_fecal_crohn_species.csv",
+        "results/species_comparisonV2/heatmap_pairs_crohn_species.png",
+        "results/species_comparisonV2/heatmap_group_contrast_species.png",
+        "results/species_comparisonV2/group_means_and_deltas_species.csv",
+        "results/species_comparisonV2/barplot_mean_species.png",
+        "results/species_comparisonV2/means_and_mean_species.csv",
+        "results/species_comparisonV2/barplot_oral_species_top15.png"   # NEW
+    threads: 1
+    shell:
+        """
+        python scripts/species_comparison_v2.py \
+            {input.oral_crohn} \
+            {input.oral_healthy} \
+            {input.fecal_crohn} \
+            {params.outdir}
+        """
 
-    script:
-        "scripts/genus_comparison.py"
-
-
+##########################################
+# Genus (Top 10) + Δ(OC−FC) & Δ(OC−OH)
+##########################################
+rule genus_comparisonV2:
+    input:
+        oral_crohn="data/filtered/oral_abund_crohn_filtered_normalized.csv",
+        oral_healthy="data/filtered/oral_abund_healthy_filtered_normalized.csv",
+        fecal_crohn="data/filtered/fecal_abund_crohn_filtered_normalized.csv"
+    params:
+        outdir="results/genus_comparisonV2"
+    output:
+        # per-group stacked bars + CSVs
+        "results/genus_comparisonV2/stackedbar_top10_oral_crohn.png",
+        "results/genus_comparisonV2/top10_oral_crohn.csv",
+        "results/genus_comparisonV2/stackedbar_top10_oral_healthy.png",
+        "results/genus_comparisonV2/top10_oral_healthy.csv",
+        "results/genus_comparisonV2/stackedbar_top10_fecal_crohn.png",
+        "results/genus_comparisonV2/top10_fecal_crohn.csv",
+        "results/genus_comparisonV2/heatmap_pairs_crohn_genus.png",
+        "results/genus_comparisonV2/heatmap_group_contrast_genus.png",
+        "results/genus_comparisonV2/group_means_and_deltas_genus.csv",
+        "results/genus_comparisonV2/barplot_mean_genus.png",        
+        "results/genus_comparisonV2/means_and_mean_genus.csv",
+        "results/genus_comparisonV2/barplot_oral_genus_top10.png"   # NEW
+    threads: 1
+    shell:
+        """
+        python scripts/genus_comparison_v2.py \
+            {input.oral_crohn} \
+            {input.oral_healthy} \
+            {input.fecal_crohn} \
+            {params.outdir}
+        """

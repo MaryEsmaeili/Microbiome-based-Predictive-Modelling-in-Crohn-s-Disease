@@ -5,3 +5,5 @@ results/
 
 # Ignore the Miniconda installer
 Miniconda3-latest-MacOSX-arm64.sh
+
+.DS_Store

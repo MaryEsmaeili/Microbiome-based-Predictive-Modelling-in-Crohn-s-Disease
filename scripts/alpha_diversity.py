@@ -4,13 +4,24 @@ import os
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy.stats import entropy, mannwhitneyu, wilcoxon, kruskal
+import yaml
 
-# -----------------------------------
-# SNAKEMAKE INPUTS/OUTPUTS
-# -----------------------------------
-oral_file = snakemake.input.oral
-fecal_file = snakemake.input.fecal
-healthy_file = snakemake.input.healthy
+# ---------- LOAD COLORS FROM YAML -----------
+with open("config.yaml", "r") as f:
+    config = yaml.safe_load(f)
+color_map = {k: v for k, v in config["colors"].items()}
+
+group_order = ["Crohn-Oral", "Crohn-Fecal", "Healthy-Oral"]
+group_palette = [color_map[g] for g in group_order]
+oh_order = ["Crohn-Oral", "Healthy-Oral"]
+oh_palette = [color_map[g] for g in oh_order]
+of_order = ["Oral", "Fecal"]
+of_palette = [color_map["Crohn-Oral"], color_map["Crohn-Fecal"]]
+
+# ---------- SNAKEMAKE INPUTS/OUTPUTS ----------
+oral_file = snakemake.input.oral_crohn
+fecal_file = snakemake.input.fecal_crohn
+healthy_file = snakemake.input.oral_healthy
 matched_ids_file = snakemake.input.matched_ids
 
 oral_out = snakemake.output.oral
@@ -19,9 +30,7 @@ healthy_out = snakemake.output.healthy
 results_dir = os.path.dirname(oral_out)
 os.makedirs(results_dir, exist_ok=True)
 
-# -----------------------------------
-# ALPHA DIVERSITY FUNCTIONS
-# -----------------------------------
+# ---------- ALPHA DIVERSITY FUNCTIONS ----------
 def shannon(x):
     x = np.array(x)
     x = x[x > 0]
@@ -43,17 +52,13 @@ def alpha_df(abund):
         'Richness': abund.apply(observed, axis=0)
     })
 
-# -----------------------------------
-# LOAD DATA
-# -----------------------------------
+# ---------- LOAD DATA ----------
 oral = pd.read_csv(oral_file, index_col=0)
 fecal = pd.read_csv(fecal_file, index_col=0)
 healthy = pd.read_csv(healthy_file, index_col=0)
 matched = pd.read_csv(matched_ids_file)
 
-# -----------------------------------
-# UNPAIRED ALPHA DIVERSITY
-# -----------------------------------
+# ---------- UNPAIRED ALPHA DIVERSITY ----------
 alpha_oral = alpha_df(oral)
 alpha_oral.index.name = 'Sample'
 alpha_oral.to_csv(oral_out)
@@ -66,9 +71,10 @@ alpha_healthy = alpha_df(healthy)
 alpha_healthy.index.name = 'Sample'
 alpha_healthy.to_csv(healthy_out)
 
-# -----------------------------------
-# PAIRED (MATCHED) ALPHA DIVERSITY
-# -----------------------------------
+# ---------- PAIRED (MATCHED) ALPHA DIVERSITY ----------
+assert set(matched['Oral_col']).issubset(set(oral.columns)), "Some Oral_col names not found in oral data!"
+assert set(matched['Fecal_col']).issubset(set(fecal.columns)), "Some Fecal_col names not found in fecal data!"
+
 oral_matched = oral[matched['Oral_col']].copy()
 fecal_matched = fecal[matched['Fecal_col']].copy()
 
@@ -85,9 +91,7 @@ matched_alpha = pd.DataFrame({
 })
 matched_alpha.to_csv(os.path.join(results_dir, "alpha_matched.csv"), index=False)
 
-# -----------------------------------
-# STATISTICAL TESTS
-# -----------------------------------
+# ---------- STATISTICAL TESTS ----------
 with open(f"{results_dir}/alpha_stats.txt", "w") as statout:
     statout.write("== Crohn Oral vs Healthy Oral (independent) ==\n")
     for metric in ['Richness', 'Shannon', 'Simpson']:
@@ -114,12 +118,10 @@ with open(f"{results_dir}/alpha_stats.txt", "w") as statout:
     statout.write("\n")
 print(f"[INFO] Statistical tests done. Results in {results_dir}/alpha_stats.txt")
 
-# -----------------------------------
-# PLOTTING
-# -----------------------------------
+# ---------- PLOTTING ----------
 sns.set(style="whitegrid", font_scale=1.1)
 
-# 1. All three groups, all metrics
+# --- 1. All three groups ---
 for metric in ['Shannon', 'Simpson', 'Richness']:
     df = pd.DataFrame({
         'Value': pd.concat([alpha_oral[metric], alpha_fecal[metric], alpha_healthy[metric]]),
@@ -128,25 +130,25 @@ for metric in ['Shannon', 'Simpson', 'Richness']:
                   ['Healthy-Oral']*len(alpha_healthy))
     })
     plt.figure(figsize=(7, 5))
-    ax = sns.boxplot(data=df, x='Group', y='Value', palette='Set2')
-    sns.stripplot(data=df, x='Group', y='Value', color='k', alpha=0.4, ax=ax)
+    ax = sns.boxplot(data=df, x='Group', y='Value', order=group_order, palette=group_palette)
+    sns.stripplot(data=df, x='Group', y='Value', order=group_order, color='k', alpha=0.4, ax=ax)
     plt.title(f'Alpha Diversity ({metric}) Across Groups')
     plt.tight_layout()
     plt.savefig(f"{results_dir}/boxplot_{metric.lower()}_allgroups.png")
     plt.close()
 
-# 2. Paired Crohn Oral vs Crohn Fecal (matched pairs)
+# --- 2. Paired Crohn Oral vs Crohn Fecal ---
 def plot_paired_boxplot(matched_alpha, metric, outdir):
     data = pd.DataFrame({
         'Oral': matched_alpha[f'Oral_{metric}'],
         'Fecal': matched_alpha[f'Fecal_{metric}']
     })
+    mdata = data.melt(var_name='SampleType', value_name=metric)
     plt.figure(figsize=(7, 5))
-    sns.boxplot(data=data.melt(var_name='SampleType', value_name=metric), x='SampleType', y=metric, palette='Set2')
-    sns.stripplot(data=data.melt(var_name='SampleType', value_name=metric), x='SampleType', y=metric, color='k', alpha=0.4, jitter=0.2)
-    # Draw lines for each pair
+    ax = sns.boxplot(data=mdata, x='SampleType', y=metric, order=of_order, palette=of_palette)
+    sns.stripplot(data=mdata, x='SampleType', y=metric, order=of_order, color='k', alpha=0.4, jitter=0.2, ax=ax)
     for i in range(len(data)):
-        plt.plot(['Oral', 'Fecal'], [data.iloc[i, 0], data.iloc[i, 1]], color='gray', alpha=0.4, linewidth=1)
+        plt.plot(of_order, [data.iloc[i, 0], data.iloc[i, 1]], color='gray', alpha=0.4, linewidth=1)
     plt.title(f'Paired Alpha Diversity: Crohn Oral vs Fecal ({metric})')
     plt.ylabel(metric)
     plt.tight_layout()
@@ -156,7 +158,7 @@ def plot_paired_boxplot(matched_alpha, metric, outdir):
 for metric in ['Shannon', 'Simpson', 'Richness']:
     plot_paired_boxplot(matched_alpha, metric, results_dir)
 
-# 3. Crohn Oral vs Healthy Oral (unpaired)
+# --- 3. Crohn Oral vs Healthy Oral (unpaired) ---
 for metric in ['Shannon', 'Simpson', 'Richness']:
     df = pd.DataFrame({
         'Value': pd.concat([alpha_oral[metric], alpha_healthy[metric]]),
@@ -164,8 +166,8 @@ for metric in ['Shannon', 'Simpson', 'Richness']:
                   ['Healthy-Oral']*len(alpha_healthy))
     })
     plt.figure(figsize=(6, 5))
-    ax = sns.boxplot(data=df, x='Group', y='Value', palette='Set1')
-    sns.stripplot(data=df, x='Group', y='Value', color='k', alpha=0.4, ax=ax)
+    ax = sns.boxplot(data=df, x='Group', y='Value', order=oh_order, palette=oh_palette)
+    sns.stripplot(data=df, x='Group', y='Value', order=oh_order, color='k', alpha=0.4, ax=ax)
     plt.title(f'Alpha Diversity ({metric}) Crohn Oral vs Healthy Oral')
     plt.tight_layout()
     plt.savefig(f"{results_dir}/boxplot_{metric.lower()}_oral_vs_healthy.png")

@@ -16,3 +16,5 @@ dependencies:
   - jupyter
   - biopython
   - pip
+  - yaml
+  - sklearn
