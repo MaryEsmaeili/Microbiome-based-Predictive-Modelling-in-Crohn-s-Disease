@@ -1,191 +1,172 @@
 #!/usr/bin/env python3
-# Reads row-oriented Excel (variables in column A, samples across columns)
-# and writes a tidy CSV with both Oral_sample_ID and Fecal_sample_ID + key clinicals.
+"""
+MakeCleanMetadata.py
+--------------------
+Reads a row-oriented Excel metadata file, normalizes it, and outputs
+a clean, analysis-ready CSV.
 
-import argparse, re
-from pathlib import Path
-import numpy as np
+Usage with Snakemake:
+    python scripts/MakeCleanMetadata.py \
+        --input data/Metadata_metagenomics.xlsx \
+        --output data/processed/clinical_clean.csv
+"""
+
 import pandas as pd
-from dateutil import parser as dtp
+import numpy as np
+import argparse
+from pathlib import Path
+from difflib import get_close_matches
 
-# ----- helpers -----
-def norm_label(s: str) -> str:
-    """Normalize labels for robust matching (case-insensitive, spaces/dots -> underscore)."""
-    s = str(s).strip().lower()
-    s = re.sub(r"[\s\.]+", "_", s)
-    s = re.sub(r"[^a-z0-9_]+", "", s)
-    s = re.sub(r"__+", "_", s)
-    return s
-
-YES = {"yes","y","true","1","ja","oui","evet"}
-NO  = {"no","n","false","0","nee","non","hayir"}
-
-def yesno_to_bool(x):
-    if pd.isna(x): return np.nan
-    s = norm_label(x)
-    if s in YES: return True
-    if s in NO:  return False
-    return np.nan
-
-def to_number(x):
-    if pd.isna(x): return np.nan
-    s = str(x).strip().replace(",", ".")
-    s = re.sub(r"[^0-9.\-eE]", "", s)
-    try: return float(s)
-    except: return np.nan
-
-def to_date(x):
-    if pd.isna(x): return pd.NaT
-    try: return pd.to_datetime(dtp.parse(str(x), dayfirst=True, fuzzy=True))
-    except: return pd.NaT
-
-# Canonical rows we want (left = output key, right = possible row-name(s) in Excel col A)
-ROW_KEYS = {
-    "Oral_sample_ID":      ["oral_sample_id"],
-    "Fecal_sample_ID":     ["fecal_sample_id"],
-    "Hospital":            ["hospital"],
-    "STUDY_ID":            ["study_id", "studyid"],
-    "Responder_study_raw": ["responder_study",
-                            "clinical_responder_hbi_4_points_or_a_reduction_in_the_hbi_by_3_points",
-                            "biochemical_responder_fecal_calprotectin_level_250_or_50_reduction"],
-    "V1_AgeatFecalSampling": ["v1_ageatfecalsampling", "v1_age_at_fecalsampling", "anthro_age", "age"],
-    "V1_BMI":              ["v1_bmi","anthro_bmi","bmi"],
-    "V1_Sex":              ["v1_sex","sex"],
-    # Optional useful dates (not required but nice to have)
-    "V1_Dateofbirth":      ["v1_dateofbirth","dateofbirth","dob"],
-    "V1_DateFecalSample":  ["v1_datefecalsample","v1_datefecalsample_80freezer","v1_datevisit"],
+# ===== Mapping: Raw column name -> Clean column name =====
+RAW_TO_CLEAN = {
+    "SampleID":              "Oral_sample_ID",
+    "Fecal_sample_ID":       "Fecal_sample_ID",
+    "STUDY_ID":              "STUDY_ID",
+    "V1_AgeatFecalSampling": "Age",
+    "V1_Sex":                "Sex",
+    "V1_BMI":                "BMI",
+    "V1_PPI_yes_or_no":      "PPI_use",
+    "V1_HarveyBradshawScore":"HBI",
+    "Responder_study":       "Responder",
 }
 
-def main():
-    ap = argparse.ArgumentParser(description="Clean row-oriented Excel metadata into tidy CSV.")
-    ap.add_argument("--input", required=True, help="Path to Metadata_metagenomics.xlsx")
-    ap.add_argument("--sheet", default=0, help="Sheet index/name (default 0)")
-    ap.add_argument("--out", default="data/processed/clinical_clean.csv", help="Output CSV path")
-    ap.add_argument("--id-row-oral", default="Oral_sample_ID", help="Row name for Oral sample IDs")
-    ap.add_argument("--id-row-fecal", default="Fecal_sample_ID", help="Row name for Fecal sample IDs")
-    args = ap.parse_args()
+# ===== Functions =====
+def read_excel_row_oriented(meta_path: str) -> pd.DataFrame:
+    """Reads a row-oriented Excel (var names in first col, samples in rows after transpose)."""
+    df = pd.read_excel(meta_path, header=None)
+    df_t = df.set_index(0).T
+    df_t.columns = df_t.columns.astype(str).str.replace(r"\s+", " ", regex=True).str.strip()
 
-    in_path = Path(args.input)
-    out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if "SampleID" not in df_t.columns:
+        if "Oral_sample_ID" in df_t.columns:
+            df_t = df_t.rename(columns={"Oral_sample_ID": "SampleID"})
+        else:
+            close = get_close_matches("SampleID", list(map(str, df_t.columns)), n=5)
+            raise KeyError(f"Couldn't find 'SampleID'. Close matches: {close}")
 
-    # Read as row-oriented: NO header; first column = variable names; others = samples
-    raw = pd.read_excel(in_path, sheet_name=args.sheet, header=None)
-    raw.columns = [f"...{i+1}" for i in range(raw.shape[1])]
-    raw = raw.rename(columns={"...1": "var"})
-    raw["var_norm"] = raw["var"].map(norm_label)
+    df_t["SampleID"] = df_t["SampleID"].astype(str).str.strip().str.upper()
 
-    # Build a matrix with variables as index and sample columns as columns
-    # We'll pick the Oral_sample_ID row to assign column names (sample IDs)
-    def row_values_by_name(name_or_list):
-        target = [norm_label(name_or_list)] if isinstance(name_or_list, str) else [norm_label(x) for x in name_or_list]
-        hit = raw[raw["var_norm"].isin(target)].index.tolist()
-        return hit
+    return df_t.reset_index(drop=True)
 
-    # Get Oral and Fecal row indices
-    oral_idx  = row_values_by_name([args.id_row_oral])
-    fecal_idx = row_values_by_name([args.id_row_fecal])
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = df.columns.astype(str).str.replace(r"\s+", " ", regex=True).str.strip()
+    return df
 
-    if len(oral_idx) != 1:
-        raise SystemExit(f"[ERR] Could not uniquely find Oral ID row '{args.id_row_oral}'. Found: {len(oral_idx)}")
-    if len(fecal_idx) != 1:
-        raise SystemExit(f"[ERR] Could not uniquely find Fecal ID row '{args.id_row_fecal}'. Found: {len(fecal_idx)}")
+def extract_clean(df_row_fixed: pd.DataFrame) -> pd.DataFrame:
+    df = normalize_columns(df_row_fixed)
+    missing = [c for c in RAW_TO_CLEAN if c not in df.columns]
+    if missing:
+        print("[ERROR] Missing required columns:")
+        for m in missing:
+            close = get_close_matches(m, df.columns, n=3)
+            print(f"  - {m}   (close?: {close})")
+        raise KeyError("Some required columns are missing.")
 
-    # Create a matrix (variables as index, sample columns as columns)
-    mat = raw.set_index("var_norm").iloc[:, 1:].copy()
+    out = df[list(RAW_TO_CLEAN.keys())].rename(columns=RAW_TO_CLEAN)
 
-    # Pull Oral IDs row and clean it; drop empty header cells and match mat columns
-    oral_row = raw.iloc[oral_idx[0], 1:]
-    # keep only non-empty IDs
-    mask = oral_row.notna() & (oral_row.astype(str).str.strip() != "")
-    # apply the same mask to the matrix columns
-    mat = mat.loc[:, mask.values]
+    for idcol in ["Oral_sample_ID", "Fecal_sample_ID"]:
+        if idcol in out.columns:
+            out[idcol] = out[idcol].astype(str).str.strip().str.upper()
 
-    oral_ids = oral_row[mask].astype(str).str.strip().values
+    for numcol in ["Age", "BMI", "HBI"]:
+        if numcol in out.columns:
+            out[numcol] = pd.to_numeric(out[numcol], errors="ignore")
 
-    # Optional: make IDs unique if there are duplicates (rare but safer)
-    def make_unique(vals):
-        seen = {}
-        out = []
-        for v in vals:
-            if v in seen:
-                seen[v] += 1
-                out.append(f"{v}_{seen[v]}")
-            else:
-                seen[v] = 0
-                out.append(v)
-        return out
+    return out
 
-    # If duplicates exist, de-dup while warning
-    if pd.Series(oral_ids).duplicated().any():
-        print("[WARN] Duplicate Oral_sample_ID values detected; appending suffixes to make them unique.")
-        oral_ids = make_unique(oral_ids)
+def normalize_clean_df_intbool(clean_df: pd.DataFrame) -> pd.DataFrame:
+    df = clean_df.copy()
 
-    # finally set the column names
-    mat.columns = oral_ids
+    # Standardize NA values
+    na_like = {"", " ", "NA", "N A", "N/A", "n/a", "NaN", "-", "—", "None", "null"}
+    def _to_nan(x):
+        if isinstance(x, str) and x.strip() in na_like:
+            return np.nan
+        return x
+    df = df.applymap(_to_nan)
 
-    # Helper to pull a variable row into a Series aligned with columns (samples)
-    def take_row(keys, converter=None):
-        keys_norm = [norm_label(k) for k in (keys if isinstance(keys, (list, tuple)) else [keys])]
-        for k in keys_norm:
-            if k in mat.index:
-                s = mat.loc[k]
-                if converter is not None:
-                    s = s.apply(converter)
-                return s
-        return None
+    # Trim strings
+    for c in df.columns:
+        if pd.api.types.is_object_dtype(df[c]):
+            df[c] = df[c].astype(str).str.replace(r"\s+", " ", regex=True).str.strip()
+            df.loc[df[c].isin(["", " "]), c] = np.nan
 
-    # Build tidy output with both IDs
-    out = pd.DataFrame(index=mat.columns)
-    out.index.name = "Oral_sample_ID"
-    out["Fecal_sample_ID"] = take_row(ROW_KEYS["Fecal_sample_ID"])
-    out["Hospital"]        = take_row(ROW_KEYS["Hospital"])
-    out["STUDY_ID"]        = take_row(ROW_KEYS["STUDY_ID"])
+    # Round Age
+    if "Age" in df.columns:
+        df["Age"] = pd.to_numeric(df["Age"], errors="coerce").round(2)
 
-    # Responder: keep raw + booleanized
-    resp_raw = take_row(ROW_KEYS["Responder_study_raw"])
-    if resp_raw is not None:
-        out["Responder_study_raw"] = resp_raw
-        out["Responder_study"] = resp_raw.apply(yesno_to_bool).astype("boolean")
+    # Sex: 0/1 int
+    if "Sex" in df.columns:
+        sex_map = {"F": 1, "Female": 1, "FEMALE": 1, "V": 1, "Woman": 1, "W": 1,
+                   "M": 0, "Male": 0, "MALE": 0, "Man": 0, "H": 0}
+        df["Sex"] = df["Sex"].map(lambda x: sex_map.get(str(x).strip(), np.nan)).astype("Int64")
+
+    # PPI_use: 0/1 int
+    if "PPI_use" in df.columns:
+        yn_map = {"Yes": 1, "YES": 1, "Y": 1, "y": 1, True: 1, "1": 1, 1: 1,
+                  "No": 0, "NO": 0, "N": 0, "n": 0, False: 0, "0": 0, 0: 0}
+        df["PPI_use"] = df["PPI_use"].map(lambda x: yn_map.get(str(x).strip(), np.nan)).astype("Int64")
+
+    # Responder: 0/1 int
+    if "Responder" in df.columns:
+        yn_map = {"Yes": 1, "YES": 1, "Y": 1, "y": 1, True: 1, "1": 1, 1: 1,
+                  "No": 0, "NO": 0, "N": 0, "n": 0, False: 0, "0": 0, 0: 0}
+        df["Responder"] = df["Responder"].map(lambda x: yn_map.get(str(x).strip(), np.nan)).astype("Int64")
+
+    return df
+
+import numpy as np
+import pandas as pd
+
+def drop_trailing_empty_rows(df: pd.DataFrame, na_tokens=None) -> pd.DataFrame:
+    """
+    Remove trailing rows at the *end* of the dataframe that are completely empty.
+    'Empty' = all cells are NA after coercing common 'NA-like' strings to NaN.
+    Keeps internal empty rows; only trims the tail.
+    """
+    if na_tokens is None:
+        na_tokens = {"", " ","nan","NA", "N A", "N/A", "n/a", "NaN", "NAN", "-", "—", "None", "null"}
+
+    # Work on a copy for detection
+    df2 = df.copy()
+
+    # Coerce NA-like strings -> NaN (only where values are strings)
+    for col in df2.columns:
+        if pd.api.types.is_string_dtype(df2[col]) or df2[col].dtype == object:
+            s = df2[col].astype(str).str.strip()
+            # empty-after-trim -> NaN
+            s = s.mask(s.eq(""), np.nan)
+            # tokens (case-insensitive) -> NaN
+            s_upper = s.str.upper()
+            df2[col] = s.mask(s_upper.isin({t.upper() for t in na_tokens}), np.nan)
+
+    # Boolean mask: row has at least one non-NaN?
+    non_empty = ~df2.isna().all(axis=1)
+
+    if non_empty.any():
+        # last index (positional) that is non-empty
+        last_pos = np.where(non_empty.values)[0][-1]
+        return df.iloc[: last_pos + 1].reset_index(drop=True)
     else:
-        out["Responder_study_raw"] = pd.NA
-        out["Responder_study"] = pd.Series([pd.NA]*len(out), dtype="boolean")
+        # everything empty -> return empty df
+        return df.iloc[0:0].reset_index(drop=True)
 
-    # Age / BMI / Sex
-    age = take_row(ROW_KEYS["V1_AgeatFecalSampling"], to_number)
-    bmi = take_row(ROW_KEYS["V1_BMI"], to_number)
-    out["Age_years"] = age.values if age is not None else np.nan
-    out["BMI"]       = bmi.values if bmi is not None else np.nan
-    sex = take_row(ROW_KEYS["V1_Sex"])
-    out["Sex"] = sex.values if sex is not None else np.nan
-
-    # Dates (optional)
-    dob = take_row(ROW_KEYS["V1_Dateofbirth"], to_date)
-    dfs = take_row(ROW_KEYS["V1_DateFecalSample"], to_date)
-    if dob is not None: out["Date_of_birth"] = dob.values
-    if dfs is not None: out["Date_fecal_sample"] = dfs.values
-
-    # If age missing but have DOB & sample date, back-calc age
-    if ("Age_years" not in out.columns or out["Age_years"].isna().all()) and \
-       ("Date_of_birth" in out.columns and "Date_fecal_sample" in out.columns):
-        out["Age_years"] = ((out["Date_fecal_sample"] - out["Date_of_birth"]).dt.days / 365.25).round(2)
-
-    # Finalize columns and write CSV
-    out = out.reset_index()  # bring Oral_sample_ID as a column
-    # Order columns
-    order = [
-        "Oral_sample_ID", "Fecal_sample_ID", "Hospital", "STUDY_ID",
-        "Responder_study", "Responder_study_raw",
-        "Age_years", "BMI", "Sex",
-        "Date_of_birth", "Date_fecal_sample"
-    ]
-    # keep order + any extras that made it in
-    cols = [c for c in order if c in out.columns] + [c for c in out.columns if c not in order]
-    out = out[cols]
-
-    out.to_csv(out_path, index=False)
-    print(f"[OK] Saved clean clinical CSV to: {out_path}")
-    print(f"[INFO] Rows (samples): {out.shape[0]}, Columns: {out.shape[1]}")
-
+# ===== Main =====
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Clean and normalize row-oriented metadata Excel.")
+    parser.add_argument("--input", required=True, help="Path to row-oriented Excel file")
+    parser.add_argument("--output", required=True, help="Path to save cleaned CSV")
+    args = parser.parse_args()
+
+    df_raw = read_excel_row_oriented(args.input)
+    clean_df = extract_clean(df_raw)
+    norm_df = normalize_clean_df_intbool(clean_df)
+
+    out_path = Path(args.output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    norm_df = drop_trailing_empty_rows(norm_df)
+    norm_df.to_csv(out_path, index=False)
+   
+
+    print(f"[OK] Clean metadata saved to: {out_path}")

@@ -1,146 +1,158 @@
-import pandas as pd
-import matplotlib.pyplot as plt
-import os
-import yaml
+# scripts/genus_comparison.py
+import os, pandas as pd
+from microbiome_common import (
+    PALETTE, ensure_taxa_by_samples, extract_genus, group_mean_percent,
+    percent_table, plot_group_stacked, save_top_csv, barplot_mean_three_groups,
+    two_bar_stacked_oc_oh, heatmaps_pairs_and_contrast,
+    run_da_oral_CH, run_da_paired_OC_FC, clr_transform
+)
 
-# yaml colors
-with open("config.yaml") as f:
-    config = yaml.safe_load(f)
-palette = config['colors']
+def main(oral_crohn_file, oral_healthy_file, fecal_crohn_file, outdir):
+    os.makedirs(outdir, exist_ok=True)
+    oc_raw = pd.read_csv(oral_crohn_file, index_col=0)
+    oh_raw = pd.read_csv(oral_healthy_file, index_col=0)
+    fc_raw = pd.read_csv(fecal_crohn_file, index_col=0)
 
-def extract_genus(rowname):
-    """
-    Extract genus name from a Metaphlan taxonomic label string (e.g., 'k__Bacteria|p__...|g__Streptococcus').
-    """
-    parts = rowname.split("|")
-    genus = [p for p in parts if p.startswith("g__")]
-    return genus[0] if genus else None
+    oc = ensure_taxa_by_samples(oc_raw)
+    oh = ensure_taxa_by_samples(oh_raw)
+    fc = ensure_taxa_by_samples(fc_raw)
 
-def save_top10_csv(genus_sum, out_path):
-    """
-    Save the top 10 genera (with total abundance) as a CSV file.
-    """
-    top10 = genus_sum.sort_values(ascending=False).head(10)
-    top10.to_csv(out_path, header=['Total_Abundance'])
+    # Stacked bars + CSV
+    plot_group_stacked(oc, 10, "Top 10 Genera - Oral Crohn Samples",
+                       os.path.join(outdir, "stackedbar_top10_oral_crohn.png"),
+                       extract_genus, "Genus", rank="genus", palette=PALETTE)
+    save_top_csv(oc, 10, extract_genus, os.path.join(outdir, "top10_oral_crohn.csv"))
 
-def plot_stacked_bar(abund_plot, out_path, title):
-    import matplotlib.pyplot as plt
-    colors = plt.get_cmap("tab20").colors
-    color_list = list(colors[:len(abund_plot)-1]) + ['#999999']
-    abund_plot.T.plot(kind='bar', stacked=True, figsize=(18,7), color=color_list)
-    plt.ylabel("Relative Abundance (%)")
-    plt.xlabel("Sample")
-    plt.title(title)
-    plt.ylim(0, 100)
-    plt.legend(bbox_to_anchor=(1.01, 1), loc='upper left', title='Genus/Species')
-    plt.tight_layout()
-    plt.savefig(out_path)
-    plt.close()
+    plot_group_stacked(oh, 10, "Top 10 Genera - Oral Healthy Samples",
+                       os.path.join(outdir, "stackedbar_top10_oral_healthy.png"),
+                       extract_genus, "Genus", rank="genus", palette=PALETTE)
+    save_top_csv(oh, 10, extract_genus, os.path.join(outdir, "top10_oral_healthy.csv"))
 
+    plot_group_stacked(fc, 10, "Top 10 Genera - Fecal Crohn Samples",
+                       os.path.join(outdir, "stackedbar_top10_fecal_crohn.png"),
+                       extract_genus, "Genus", rank="genus", palette=PALETTE)
+    save_top_csv(fc, 10, extract_genus, os.path.join(outdir, "top10_fecal_crohn.csv"))
 
-def plot_top10_all_oral(oral_crohn, oral_healthy, outdir):
-    """
-    Calculate the top 10 most abundant genera across all oral samples (Crohn + Healthy).
-    Save a stacked barplot and a CSV with top 10 genera and their total abundances.
-    """
-    # Combine all oral samples
-    all_oral = pd.concat([oral_crohn, oral_healthy], axis=1)
-    # Calculate total abundance for each genus
-    genus_sum = all_oral.groupby(extract_genus).sum().sum(axis=1)
-    top10 = genus_sum.sort_values(ascending=False).head(10).index
+    # % tables
+    oc_pct = percent_table(oc, extract_genus)
+    oh_pct = percent_table(oh, extract_genus)
+    fc_pct = percent_table(fc, extract_genus)
 
-    # Aggregate abundances by genus
-    abund = all_oral.groupby(extract_genus).sum()
-    # Add "Other" category for non-top10 genera
-    abund.loc["Other"] = abund.loc[~abund.index.isin(top10)].sum()
-    abund_plot = abund.loc[list(top10) + ["Other"]]
-    # Normalize abundances to percent per sample
-    abund_plot = abund_plot.div(abund_plot.sum(axis=0), axis=1) * 100
+    # Heatmaps (pairs + contrast)
+    try:
+        matched = pd.read_csv("data/processed/matched_sample_ids.csv")
+    except Exception:
+        matched = None
+    heatmaps_pairs_and_contrast(oc_pct, oh_pct, fc_pct, rank="genus", outdir=outdir,
+                                palette=PALETTE, n=10, matched_pairs=matched,
+                                use_log1p=True, clip_quantile=0.98, col_cluster_pairs=False)
 
-    plot_stacked_bar(
-        abund_plot,
-        os.path.join(outdir, "stackedbar_top10_all_oral.png"),
-        "Top 10 Genera Across All Oral Samples (Crohn + Healthy)"
+    # Mean barplot OC/OH/FC
+    barplot_mean_three_groups(
+        oc_pct, oh_pct, fc_pct, rank="genus",
+        out_png=os.path.join(outdir, "barplot_mean_genus.png"),
+        palette=PALETTE, n_for_union=10
     )
-    # Save top10 genera to CSV
-    save_top10_csv(genus_sum, os.path.join(outdir, "top10_all_oral.csv"))
+    # Save means_and_mean_genus.csv to satisfy Snakemake outputs
+    top_oc = oc_pct.sum(axis=1).sort_values(ascending=False).head(10).index
+    top_fc = fc_pct.sum(axis=1).sort_values(ascending=False).head(10).index
+    union  = top_oc.union(top_fc)
+    mean_oc = oc_pct.reindex(union).fillna(0).mean(axis=1)
+    mean_fc = fc_pct.reindex(union).fillna(0).mean(axis=1)
+    mean_oh = oh_pct.reindex(union).fillna(0).mean(axis=1)
+    pd.DataFrame({"Mean_OC_%": mean_oc, "Mean_FC_%": mean_fc, "Mean_OH_%": mean_oh}) \
+    .to_csv(os.path.join(outdir, "means_and_mean_genus.csv"))
 
-def plot_top10_by_group(oral_group, group_name, outdir):
-    """
-    Find top 10 most abundant genera in one group (Crohn or Healthy oral).
-    Save stacked barplot and CSV of top 10 genera and their total abundances.
-    """
-    genus_sum = oral_group.groupby(extract_genus).sum().sum(axis=1)
-    top10 = genus_sum.sort_values(ascending=False).head(10).index
-
-    abund = oral_group.groupby(extract_genus).sum()
-    abund.loc["Other"] = abund.loc[~abund.index.isin(top10)].sum()
-    abund_plot = abund.loc[list(top10) + ["Other"]]
-    abund_plot = abund_plot.div(abund_plot.sum(axis=0), axis=1) * 100
-
-    plot_stacked_bar(
-        abund_plot,
-        os.path.join(outdir, f"stackedbar_top10_{group_name}.png"),
-        f"Top 10 Genera - {group_name.capitalize()} Samples"
+    # Two-bar OC vs OH
+    mean_oc = group_mean_percent(oc, extract_genus)
+    mean_oh = group_mean_percent(oh, extract_genus)
+    two_bar_stacked_oc_oh(
+        oc_mean=mean_oc, oh_mean=mean_oh, rank="genus",
+        out_png=os.path.join(outdir, "barplot_oral_genus_top10.png"),
+        palette=PALETTE
     )
-    # Save top10 genera to CSV
-    save_top10_csv(genus_sum, os.path.join(outdir, f"top10_{group_name}.csv"))
 
-def plot_compare_bar(oral_crohn, oral_healthy, outdir):
-    """
-    Plot a grouped bar chart comparing mean abundance (%) of top 10 genera between Crohn and Healthy oral samples.
-    Save CSV of mean abundances for top 10 genera.
-    """
-    # Find top 10 genera by combined abundance (Crohn + Healthy)
-    genus_sum_crohn = oral_crohn.groupby(extract_genus).sum().sum(axis=1)
-    genus_sum_healthy = oral_healthy.groupby(extract_genus).sum().sum(axis=1)
-    all_genus = genus_sum_crohn.add(genus_sum_healthy, fill_value=0)
-    top10 = all_genus.sort_values(ascending=False).head(10).index
+    # Differential abundance
+    all_taxa = pd.Index(oc_pct.index).union(fc_pct.index).union(oh_pct.index)
 
-    # Calculate mean abundance per genus (percent, per group)
-    mean_crohn = oral_crohn.groupby(extract_genus).sum().loc[top10].mean(axis=1)
-    mean_healthy = oral_healthy.groupby(extract_genus).sum().loc[top10].mean(axis=1)
-    df = pd.DataFrame({'Oral_Crohn': mean_crohn, 'Oral_Healthy': mean_healthy})
-    df = df.div(df.sum(axis=0), axis=1) * 100  # Normalize to percent
-    df.plot(
-        kind='bar',
-        width=0.6,
-        figsize=(12,6),
-        color=[palette['Crohn-Oral'], palette['Healthy-Oral']]
+    run_da_oral_CH(
+        mat_taxa_samples=oc_pct.reindex(all_taxa).fillna(0).join(
+            oh_pct.reindex(all_taxa).fillna(0), how="outer"
+        ),
+        labels_A=oc_pct.columns, labels_B=oh_pct.columns, tax_labels=all_taxa,
+        out_csv=os.path.join(outdir, "da_oral_CH_genus.csv"),
+        do_volcano_png=os.path.join(outdir, "volcano_oral_CH_genus.png"),
+        rank="genus"
     )
-    plt.ylabel("Relative Abundance (%)")
-    plt.xlabel("Genus")
-    plt.title("Top 10 Genus: Crohn Oral vs Healthy Oral (Mean Abundance)")
-    plt.legend(["Oral Crohn", "Oral Healthy"], fontsize=12)
-    plt.tight_layout()
-    plt.xticks(rotation=45, ha='right')
-    plt.savefig(os.path.join(outdir, "barplot_top10_oral_crohn_vs_healthy.png"))
-    plt.close()
-    # Save to CSV
-    df.to_csv(os.path.join(outdir, "top10_compare_oral_crohn_vs_healthy.csv"))
+
+    if matched is not None and not matched.empty:
+        try:
+            run_da_paired_OC_FC(
+                mat_taxa_samples_OC=oc_pct, mat_taxa_samples_FC=fc_pct,
+                matched_df=matched, tax_labels=all_taxa,
+                out_csv=os.path.join(outdir, "da_paired_OC_FC_genus.csv"),
+                rank="genus"
+            )
+        except KeyError as e:
+            print("[WARN]", e)
+            empty_cols = ["taxon","pretty_taxon","test","stat","p","q","effect_name","effect_size","delta_median"]
+            pd.DataFrame(columns=empty_cols).to_csv(os.path.join(outdir, "da_paired_OC_FC_genus.csv"), index=False)
+    else:
+        empty_cols = ["taxon","pretty_taxon","test","stat","p","q","effect_name","effect_size","delta_median"]
+        pd.DataFrame(columns=empty_cols).to_csv(os.path.join(outdir, "da_paired_OC_FC_genus.csv"), index=False)
+
+    # CLR variants
+    clr_oc = clr_transform(oc.groupby(extract_genus).sum(numeric_only=True))
+    clr_fc = clr_transform(fc.groupby(extract_genus).sum(numeric_only=True))
+    clr_oh = clr_transform(oh.groupby(extract_genus).sum(numeric_only=True))
+    clr_taxa = pd.Index(clr_oc.index).union(clr_fc.index).union(clr_oh.index)
+
+    run_da_oral_CH(
+        mat_taxa_samples=clr_oc.reindex(clr_taxa).fillna(0).join(
+            clr_oh.reindex(clr_taxa).fillna(0), how="outer"
+        ),
+        labels_A=clr_oc.columns, labels_B=clr_oh.columns, tax_labels=clr_taxa,
+        out_csv=os.path.join(outdir, "clr_da_oral_CH_genus.csv"),
+        do_volcano_png=None, rank="genus"
+    )
+
+    if matched is not None and not matched.empty:
+        try:
+            run_da_paired_OC_FC(
+                mat_taxa_samples_OC=clr_oc, mat_taxa_samples_FC=clr_fc,
+                matched_df=matched, tax_labels=clr_taxa,
+                out_csv=os.path.join(outdir, "clr_da_paired_OC_FC_genus.csv"),
+                rank="genus"
+            )
+        except KeyError as e:
+            print("[WARN]", e)
+            empty_cols = ["taxon","pretty_taxon","test","stat","p","q","effect_name","effect_size","delta_median"]
+            pd.DataFrame(columns=empty_cols).to_csv(os.path.join(outdir, "clr_da_paired_OC_FC_genus.csv"), index=False)
+    else:
+        empty_cols = ["taxon","pretty_taxon","test","stat","p","q","effect_name","effect_size","delta_median"]
+        pd.DataFrame(columns=empty_cols).to_csv(os.path.join(outdir, "clr_da_paired_OC_FC_genus.csv"), index=False)
+
+    # Top10 for slides (optional)
+    try:
+        df_sig = pd.read_csv(os.path.join(outdir, "da_oral_CH_genus.csv"))
+        if not df_sig.empty and "q" in df_sig.columns:
+            df_sig.sort_values("q").head(10).to_csv(os.path.join(outdir, "top10_significant_genus.csv"), index=False)
+        else:
+            pd.DataFrame(columns=["taxon","pretty_taxon","q"]).to_csv(os.path.join(outdir, "top10_significant_genus.csv"), index=False)
+    except Exception:
+        pd.DataFrame(columns=["taxon","pretty_taxon","q"]).to_csv(os.path.join(outdir, "top10_significant_genus.csv"), index=False)
+
+    print("[INFO] Genus comparison done ->", outdir)
 
 if __name__ == "__main__":
     try:
-        # For Snakemake pipeline
-        oral_crohn_file = snakemake.input.oral_crohn
-        oral_healthy_file = snakemake.input.oral_healthy
-        outdir = snakemake.params.outdir
+        oral_crohn_file = snakemake.input[0]
+        oral_healthy_file = snakemake.input[1]
+        fecal_crohn_file = snakemake.input[2]
+        outdir = "results/genus_comparison"
     except NameError:
-        # For command-line usage
-        import sys
-        oral_crohn_file = sys.argv[1]
-        oral_healthy_file = sys.argv[2]
-        outdir = sys.argv[3]
-    os.makedirs(outdir, exist_ok=True)
-
-    # Load input abundance tables (indexed by taxon)
-    oral_crohn = pd.read_csv(oral_crohn_file, index_col=0)
-    oral_healthy = pd.read_csv(oral_healthy_file, index_col=0)
-
-    # Generate all top10 genus plots and CSVs
-    plot_top10_all_oral(oral_crohn, oral_healthy, outdir)
-    plot_top10_by_group(oral_crohn, "oral_crohn", outdir)
-    plot_top10_by_group(oral_healthy, "oral_healthy", outdir)
-    plot_compare_bar(oral_crohn, oral_healthy, outdir)
-
-    print("[INFO] All done! Check:", outdir)
+        import sys, os
+        if len(sys.argv) < 5:
+            raise SystemExit("Usage: python genus_comparison.py <oral_crohn.csv> <oral_healthy.csv> <fecal_crohn.csv> <outdir>")
+        oral_crohn_file, oral_healthy_file, fecal_crohn_file, outdir = sys.argv[1:5]
+    main(oral_crohn_file, oral_healthy_file, fecal_crohn_file, outdir)
