@@ -1,95 +1,156 @@
+#!/usr/bin/env python3
+import os
 import pandas as pd
 import numpy as np
-import os
 
-# ---------------------
-# Snakemake Inputs
-# ---------------------
-metadata_file = snakemake.input.metadata
-crohn_file = snakemake.input.crohn
-healthy_file = snakemake.input.healthy
+# ------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------
+def ensure_dir(path):
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
 
-# ---------------------
-# Snakemake Outputs
-# ---------------------
-oral_abund_crohn_out = snakemake.output[0]
-fecal_abund_crohn_out = snakemake.output[1]
-oral_abund_healthy_out = snakemake.output[2]
-matched_ids_out = snakemake.output[3]
+def to_numeric_df(df: pd.DataFrame) -> pd.DataFrame:
+    return df.apply(pd.to_numeric, errors="coerce")
 
-# Ensure output directory exists
-os.makedirs(os.path.dirname(oral_abund_crohn_out), exist_ok=True)
+def norm_id_5(x):
+    """Keep first 5 chars (your Utrecht merged table logic)."""
+    if pd.isna(x):
+        return x
+    s = str(x).strip()
+    return s[:5]
 
-# ---------------------
-# 1. Load metadata and abundance tables
-# ---------------------
-metadata = pd.read_excel(metadata_file, header=None, index_col=0)
-metadata = metadata.T.reset_index(drop=True)
-metadata = metadata[['STUDY_ID', 'Oral_sample_ID', 'Fecal_sample_ID']]
-metadata.columns = metadata.columns.astype(str).str.strip()
+def parse_utrecht_merged(tsv_path: str):
+    """
+    Expect columns: '#clade_name', 'NCBI_tax_id', then sample columns.
+    We keep clade_name as index and abundance matrix as float.
+    """
+    df = pd.read_csv(tsv_path, sep="\t")
+    # row metadata
+    rowdata = df.iloc[:, :2].copy()
+    if "#clade_name" in rowdata.columns:
+        rowdata = rowdata.rename(columns={"#clade_name": "clade_name"})
+    # abundance part
+    abund = df.iloc[:, 2:].copy()
 
-# Load Crohn Metaphlan merged data
-crohn = pd.read_csv(crohn_file, sep="\t")
-rowdata = crohn.iloc[:, :2]
-abund_data = crohn.iloc[:, 2:]
-rowdata.rename(columns={"#clade_name": "clade_name"}, inplace=True)
-# Load healthy oral metaphlan data
-healthy = pd.read_csv(
-    healthy_file, 
-    sep="\t", 
-    comment="#", 
-    header=0, 
-    index_col=0, 
-    low_memory=False
-)
+    # Drop accidental merge suffixes
+    drop_cols = [c for c in abund.columns if c.endswith("_y")]
+    abund = abund.drop(columns=drop_cols, errors="ignore")
 
-# ---------------------
-# 2. Clean sample names for consistent IDs
-# ---------------------
-abund_data = abund_data.drop(columns=[col for col in abund_data.columns if col.endswith('_y')], errors='ignore')
-abund_data.columns = [col[:5] for col in abund_data.columns]
+    # Normalize sample column ids to first 5 chars (to match metadata)
+    abund.columns = [norm_id_5(c) for c in abund.columns]
 
-healthy = healthy.drop(['NCBI_tax_id'], axis=1, errors='ignore')
-healthy.columns = [col.split('-')[-1].replace('_metaphlan','')[:6] for col in healthy.columns]
+    abund = to_numeric_df(abund)
+    rowdata = rowdata.reset_index(drop=True)
+    clade = rowdata["clade_name"]
+    return clade, abund
 
-# ---------------------
-# 3. Convert all abundance data to numeric
-# ---------------------
-abund_data = abund_data.apply(pd.to_numeric, errors='coerce')
-healthy = healthy.apply(pd.to_numeric, errors='coerce')
+def parse_metaphlan_single(tsv_path: str, id_slice: int = 6):
+    """
+    Generic MetaPhlAn table (rows=taxa, cols=samples). Often has NCBI_tax_id.
+    We:
+      - drop NCBI_tax_id if present
+      - normalize sample ids (last token after '-' and strip '_metaphlan'), then slice first `id_slice` chars
+      - coerce to numeric and keep only rows with sum>0
+    """
+    df = pd.read_csv(tsv_path, sep="\t", comment="#", header=0, index_col=0, low_memory=False)
+    df = df.drop(columns=["NCBI_tax_id"], errors="ignore")
 
-# ---------------------
-# 4. Find matched oral/fecal pairs for Crohn patients
-# ---------------------
+    def clean_col(c):
+        base = str(c).split("-")[-1].replace("_metaphlan", "")
+        return base[:id_slice]
+
+    df.columns = [clean_col(c) for c in df.columns]
+    df = to_numeric_df(df)
+    df = df.loc[df.sum(axis=1) > 0]
+    return df
+
 def match_sample_col(sample_id, columns):
-    if pd.isnull(sample_id) or sample_id == '':
+    if pd.isnull(sample_id) or str(sample_id).strip() == "":
         return np.nan
-    if sample_id in columns:
-        return sample_id
-    else:
-        print(f"[WARN] No match for sample {sample_id}")
-        return np.nan
+    sid = norm_id_5(sample_id)
+    if sid in columns:
+        return sid
+    print(f"[WARN] No match for sample {sample_id} -> {sid}")
+    return np.nan
 
-metadata['Oral_col'] = metadata['Oral_sample_ID'].apply(lambda x: match_sample_col(x, abund_data.columns))
-metadata['Fecal_col'] = metadata['Fecal_sample_ID'].apply(lambda x: match_sample_col(x, abund_data.columns))
-matched = metadata.dropna(subset=['Oral_col', 'Fecal_col']).reset_index(drop=True)
+# ------------------------------------------------------------
+# Snakemake I/O
+# ------------------------------------------------------------
+metadata_file    = snakemake.input.metadata
+crohn_file       = snakemake.input.crohn
+healthy_oral_in  = snakemake.input.healthy_oral
+healthy_fecal_in = snakemake.input.healthy_fecal
 
-# ---------------------
-# 5. Export processed abundance tables (all Crohn oral/fecal and healthy oral)
-# ---------------------
-oral_abund_crohn = abund_data[metadata['Oral_col'].dropna().unique()].copy()
-oral_abund_crohn.index = rowdata['clade_name']
-oral_abund_crohn = oral_abund_crohn.loc[oral_abund_crohn.sum(axis=1) > 0]
-oral_abund_crohn.to_csv(oral_abund_crohn_out, index=True)
+oral_abund_crohn_out   = snakemake.output.oral_crohn
+fecal_abund_crohn_out  = snakemake.output.fecal_crohn
+oral_abund_healthy_out = snakemake.output.oral_healthy
+fecal_abund_healthy_out= snakemake.output.fecal_healthy
+matched_ids_out        = snakemake.output.matched
 
-fecal_abund_crohn = abund_data[metadata['Fecal_col'].dropna().unique()].copy()
-fecal_abund_crohn.index = rowdata['clade_name']
-fecal_abund_crohn = fecal_abund_crohn.loc[fecal_abund_crohn.sum(axis=1) > 0]
-fecal_abund_crohn.to_csv(fecal_abund_crohn_out, index=True)
+for p in [oral_abund_crohn_out, fecal_abund_crohn_out, oral_abund_healthy_out,
+          fecal_abund_healthy_out, matched_ids_out]:
+    ensure_dir(p)
 
-oral_abund_healthy = healthy.loc[healthy.sum(axis=1) > 0].copy()
-oral_abund_healthy.to_csv(oral_abund_healthy_out, index=True)
+# ------------------------------------------------------------
+# 1) Load metadata
+#    Your sheet is headerless; first column holds keys -> transpose.
+# ------------------------------------------------------------
+meta = pd.read_excel(metadata_file, header=None, index_col=0)
+meta = meta.T.reset_index(drop=True)
+# Keep only needed cols (robust to stray whitespace / dtype)
+meta.columns = meta.columns.astype(str).str.strip()
+required = ["STUDY_ID", "Oral_sample_ID", "Fecal_sample_ID"]
+missing = [c for c in required if c not in meta.columns]
+if missing:
+    raise ValueError(f"Missing required metadata columns: {missing}")
+meta = meta[required].copy()
 
-matched[['STUDY_ID','Oral_col','Fecal_col']].to_csv(matched_ids_out, index=False)
+# Clean for matching against Utrecht-abundance (use first 5 chars)
+meta["Oral_clean"]  = meta["Oral_sample_ID"].apply(norm_id_5)
+meta["Fecal_clean"] = meta["Fecal_sample_ID"].apply(norm_id_5)
 
-print(f"Saved:\n - {oral_abund_crohn_out}\n - {fecal_abund_crohn_out}\n - {oral_abund_healthy_out}\n - {matched_ids_out}")
+# ------------------------------------------------------------
+# 2) Load Crohn merged (Utrecht) and split oral/fecal by metadata matches
+# ------------------------------------------------------------
+clade_names, abund_utrecht = parse_utrecht_merged(crohn_file)
+
+# Find matches
+meta["Oral_col"]  = meta["Oral_clean"].apply(lambda x: match_sample_col(x, abund_utrecht.columns))
+meta["Fecal_col"] = meta["Fecal_clean"].apply(lambda x: match_sample_col(x, abund_utrecht.columns))
+matched = meta.dropna(subset=["Oral_col", "Fecal_col"]).reset_index(drop=True)
+
+# Build Crohn oral/fecal tables
+oral_crohn = abund_utrecht[matched["Oral_col"].unique()].copy()
+oral_crohn.index = clade_names
+oral_crohn = oral_crohn.loc[oral_crohn.sum(axis=1) > 0]
+
+fecal_crohn = abund_utrecht[matched["Fecal_col"].unique()].copy()
+fecal_crohn.index = clade_names
+fecal_crohn = fecal_crohn.loc[fecal_crohn.sum(axis=1) > 0]
+
+# ------------------------------------------------------------
+# 3) Healthy oral + NEW healthy fecal
+# ------------------------------------------------------------
+oral_healthy   = parse_metaphlan_single(healthy_oral_in,  id_slice=6)
+fecal_healthy  = parse_metaphlan_single(healthy_fecal_in, id_slice=6)
+
+# ------------------------------------------------------------
+# 4) Save
+# ------------------------------------------------------------
+oral_crohn.to_csv(oral_abund_crohn_out, index=True)
+fecal_crohn.to_csv(fecal_abund_crohn_out, index=True)
+oral_healthy.to_csv(oral_abund_healthy_out, index=True)
+fecal_healthy.to_csv(fecal_abund_healthy_out, index=True)
+
+matched[["STUDY_ID", "Oral_col", "Fecal_col"]].to_csv(matched_ids_out, index=False)
+
+print(
+    "Saved:\n"
+    f" - {oral_abund_crohn_out}\n"
+    f" - {fecal_abund_crohn_out}\n"
+    f" - {oral_abund_healthy_out}\n"
+    f" - {fecal_abund_healthy_out}\n"
+    f" - {matched_ids_out}"
+)
