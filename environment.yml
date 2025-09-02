@@ -18,3 +18,9 @@ dependencies:
   - pip
   - yaml
   - sklearn
+  - r-base=4.3.*
+  - r-tidyverse=2.*        # readr, dplyr, tidyr, stringr, purrr, ggplot2
+  - r-broom=1.*
+  - r-sandwich=3.*
+  - r-lmtest=0.*
+  - r-effsize=0.*
