@@ -24,3 +24,5 @@ dependencies:
   - r-sandwich=3.*
   - r-lmtest=0.*
   - r-effsize=0.*
+  - codacore
+  - coda4microbiome
