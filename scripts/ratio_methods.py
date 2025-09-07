@@ -239,22 +239,43 @@ def baseline_models(X_baseline: np.ndarray, y: np.ndarray, seed=13):
     results.append(("RF", p_rf, auc_rf))
     return results
 
-def method_plr_l1(R: np.ndarray, y: np.ndarray, seed=13):
-    """L1 logistic over all pairwise ratios."""
-    if R.shape[1]==0:
-        return np.zeros(len(y)), float("nan"), None
-    pipe = Pipeline([("scaler", StandardScaler(with_mean=True, with_std=True)),
-                     ("clf", LogisticRegression(penalty="l1", solver="liblinear", class_weight="balanced",
-                                                max_iter=5000, random_state=seed))])
-    grid = {"clf__C":[0.1, 1, 10]}
-    p, auc = calibrate_and_oof(pipe, R, y, seed=seed, param_grid=grid)
-    # refit on full data to get coefficients
-    gs = GridSearchCV(pipe, grid, cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=seed),
-                      n_jobs=-1, scoring="roc_auc", refit=True)
+def method_plr_l1(R, y, seed=13, scoring="average_precision"):
+    # drop near-zero-variance ratios
+    std = R.std(axis=0)
+    keep = std > 1e-6
+    R = R[:, keep]
+
+    if R.shape[1] == 0:
+        return np.zeros(len(y)), float("nan"), np.array([])
+
+    pipe = Pipeline([
+        ("scaler", StandardScaler(with_mean=True, with_std=True)),
+        ("clf", LogisticRegression(
+            penalty="elasticnet", solver="saga", class_weight="balanced",
+            max_iter=8000, l1_ratio=0.7, random_state=seed, n_jobs=-1))
+    ])
+    grid = {
+        "clf__C": [0.1, 0.3, 1, 3, 10, 30, 100],
+        "clf__l1_ratio": [0.3, 0.5, 0.7, 0.9, 1.0]  # 1.0 == pure L1
+    }
+
+    p, auc = calibrate_and_oof(
+        pipe, R, y, seed=seed,
+        param_grid=grid, inner_splits=3, outer_splits=5, outer_repeats=5,
+        calibration="sigmoid"
+    )
+
+    # refit on full data to extract coefficients (use AP to pick slightly denser models)
+    gs = GridSearchCV(
+        pipe, grid,
+        cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=seed),
+        n_jobs=-1, scoring=scoring, refit=True
+    )
     gs.fit(R, y)
     best = gs.best_estimator_
     coef = best.named_steps["clf"].coef_.ravel()
     return p, auc, coef
+
 
 def method_best_single_ratio(X_log: np.ndarray, y: np.ndarray, pairs_matrix: np.ndarray, pair_names: List[str], seed=13):
     """Inner-CV selects best single ratio per outer fold; returns OOF probs and fold-wise chosen names."""
@@ -344,7 +365,7 @@ def run_one(oral_or_fecal, level, abund_path, covars_path, args, comp_rows):
     # save coefficients & taxa importance
     if coef_plr is not None and len(pair_names)==len(coef_plr):
         dfc = pd.DataFrame({"pair":pair_names, "coef":coef_plr, "abscoef":np.abs(coef_plr)})
-        dfc = dfc[dfc["coef"]!=0].sort_values("abscoef", ascending=False)
+        dfc = dfc[np.abs(dfc["coef"]) > 1e-6].sort_values("abscoef", ascending=False)
         write_csv(dfc, os.path.join(out_dir, "ratio_coefs_PLR_L1.csv"))
         # taxa importance (sum |coef| over pairs containing the taxon)
         taxa_imp = {}

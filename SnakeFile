@@ -171,8 +171,7 @@ rule all:
         # --- ML (three runs) ---
         "results/ml-ibd_levels/.done",
         "results/ml-ratios/.done",
-        "results/responder_species/.done",
-        "results/responder_genus/.done",
+        "results/responder_prediction/.done",
         "results/oral_fecal_overlap/.done",
         "results/responder_combined/.done"
 
@@ -633,33 +632,52 @@ rule ml_ratios:
           --top-m 30 \
           --seed 13
         """
-# ---------- تنظیم مسیرها ----------
+
+# ---------- Responder prediction: oral / fecal / combined (genus + species) ----------
+# ---------- Inputs ----------
 CROHN_META  = "data/meta/crohn_metadata_extended.csv"
 ORAL_PROC   = "data/filtered/oral_abund_crohn_filtered_normalized.csv"
 FECAL_PROC  = "data/filtered/fecal_abund_crohn_filtered_normalized.csv"
 
-# ---------- Responder prediction (species + genus) ----------
 rule responder_prediction:
     input:
         meta  = CROHN_META,
         oral  = ORAL_PROC,
         fecal = FECAL_PROC,
     output:
-        species_done = touch("results/responder_species/.done"),
-        genus_done   = touch("results/responder_genus/.done"),
+        touch("results/responder_prediction/.done")
     params:
-        outdir = "results/responder_prediction",
+        outdir       = "results/responder_prediction",
+        min_prev     = 0.00,
+        use_clr      = 1,
+        pseudo       = 1e-6,
+        cohort       = "intersection",
+        seed         = 42,
+        splits       = 5,
+        rf_trees     = 1000,
+        enet_c       = 1.0,
+        l1_ratio     = 0.5
     shell:
         r"""
+        set -euo pipefail
         python scripts/responder_prediction.py \
-            --metadata {input.meta} \
-            --oral {input.oral} \
-            --fecal {input.fecal} \
-            --outdir {params.outdir}
+          --metadata {input.meta} \
+          --oral {input.oral} \
+          --fecal {input.fecal} \
+          --outdir {params.outdir} \
+          --min-prevalence {params.min_prev} \
+          --use-clr {params.use_clr} \
+          --pseudocount {params.pseudo} \
+          --cohort {params.cohort} \
+          --seed {params.seed} \
+          --splits {params.splits} \
+          --rf-trees {params.rf_trees} \
+          --enet-C {params.enet_c} \
+          --l1-ratio {params.l1_ratio}
 
-        test -f {params.outdir}/species/roc.png && touch {output.species_done} || touch {output.species_done}
-        test -f {params.outdir}/genus/roc.png   && touch {output.genus_done}   || touch {output.genus_done}
+        touch {output}
         """
+
 # ---------------- Oral–Fecal Overlap ----------------
 rule oral_fecal_overlap:
     input:
@@ -679,30 +697,5 @@ rule oral_fecal_overlap:
           --fecal {input.fecal} \
           --outdir {params.outdir} \
           --presence-threshold {params.pres}
-        touch {output}
-        """
-# --- Combined oral+fecal responder prediction ---
-#############################################
-# Responder: oral vs fecal vs combined
-#############################################
-
-rule responder_combined:
-    input:
-        meta  = "data/meta/crohn_metadata_extended.csv",
-        oral  = "data/filtered/oral_abund_crohn_filtered_normalized.csv",
-        fecal = "data/filtered/fecal_abund_crohn_filtered_normalized.csv",
-    output:
-        touch("results/responder_combined/.done")
-    params:
-        outdir = "results/responder_combined"
-    shell:
-        r"""
-        python scripts/predict_combined.py \
-          --metadata {input.meta} \
-          --oral {input.oral} \
-          --fecal {input.fecal} \
-          --outdir {params.outdir}
-
-        # mark as done (we still want .done even if some modes are EMPTY_DESIGN)
         touch {output}
         """
