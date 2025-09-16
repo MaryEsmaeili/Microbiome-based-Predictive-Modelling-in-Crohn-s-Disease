@@ -110,6 +110,9 @@ rule all:
         "results/alpha_diversity/paired_alpha_delta_boxplot.png",
         "results/alpha_diversity/boxplot_shannon_allgroups.png",
         "results/alpha_diversity/boxplot_simpson_allgroups.png",
+        "results/alpha_diversity/boxplot_richness_allgroups.png",
+        "results/alpha_diversity/boxplot_shannon_oral_vs_healthy.png",
+        "results/alpha_diversity/boxplot_simpson_oral_vs_healthy.png",
         "results/alpha_diversity/boxplot_richness_oral_vs_healthy.png",
         "results/alpha_diversity/paired_boxplot_shannon_oral_fecal.png",
         "results/alpha_diversity/paired_boxplot_simpson_oral_fecal.png",
@@ -267,8 +270,9 @@ rule preprocessing:
         healthy_fecal = "data/fecal_only_results_metaphlan4.txt"
     output:
         oral_crohn    = "data/processed/oral_abund_crohn.csv",
-        oral_healthy  = "data/processed/oral_abund_healthy.csv",
-        fecal_healthy = "data/processed/fecal_abund_healthy.csv",
+        fecal_crohn   = "data/processed/fecal_abund_crohn.csv",
+        healthy_oral  = "data/processed/oral_abund_healthy.csv",   # key matches preprocessing.py
+        healthy_fecal = "data/processed/fecal_abund_healthy.csv",  # key matches preprocessing.py
         matched       = "data/processed/matched_sample_ids.csv"
     script:
         "scripts/preprocessing.py"
@@ -290,8 +294,8 @@ rule filtering:
         report             = "results/filtering/filtering_report.txt",
         barplot            = "results/filtering/filtering_barplot_allgroups.png"
     params:
-        prevalence = 0.10,
-        abundance  = 0.10
+        prevalence = 0.20,
+        abundance  = 10.0     # 10% on percent-scaled inputs (0..100)
     script:
         "scripts/filtering.py"
 
@@ -611,7 +615,6 @@ rule ibd_within_ml0:
           --use-clr
         """
 
-
 rule ml_ratios:
     input:
         oral   = "data/filtered/oral_abund_crohn_filtered_normalized.csv",
@@ -634,7 +637,6 @@ rule ml_ratios:
         """
 
 # ---------- Responder prediction: oral / fecal / combined (genus + species) ----------
-# ---------- Inputs ----------
 CROHN_META  = "data/meta/crohn_metadata_extended.csv"
 ORAL_PROC   = "data/filtered/oral_abund_crohn_filtered_normalized.csv"
 FECAL_PROC  = "data/filtered/fecal_abund_crohn_filtered_normalized.csv"
@@ -688,7 +690,7 @@ rule oral_fecal_overlap:
         touch("results/oral_fecal_overlap/.done")
     params:
         outdir = "results/oral_fecal_overlap",
-        pres   = 0.0   # any > 0 is considered 'present'; change if you want stricter presence
+        pres   = 0.0
     shell:
         r"""
         python scripts/oral_fecal_overlap.py \
