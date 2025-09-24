@@ -1,0 +1,10 @@
+group:
+  Fecal_Crohn:   "#78688E"
+  Oral_Crohn:    "#B499E5"
+  Fecal_Healthy: "#416388"
+  Oral_Healthy:  "#7FB3D5"
+synonyms:
+  Fecal_Crohn:   ["Crohn-Fecal", "Fecal_Crohn"]
+  Oral_Crohn:    ["Crohn-Oral", "Oral_Crohn"]
+  Fecal_Healthy: ["Healthy-Fecal", "Fecal_Healthy"]
+  Oral_Healthy:  ["Healthy-Oral", "Oral_Healthy"]

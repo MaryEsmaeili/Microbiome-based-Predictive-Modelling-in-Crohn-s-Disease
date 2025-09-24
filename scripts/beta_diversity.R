@@ -1,361 +1,528 @@
-# beta_diversity.R
-# PCoA + PERMANOVA(+files) + PERMDISP (site) + paired distances + summaries.
-# Uses group colors strictly from config.yaml.
+#!/usr/bin/env Rscript
+# =============================================================================
+# Beta Diversity — PCoA, PERMANOVA(+covariates & interaction), PERMDISP,
+# Paired oral–fecal distances (Crohn), and group distance table.
+#
+# Robust to:
+# - color YAML schemas (legacy colors: {}, or group/synonyms)
+# - low/imbalanced sample sizes (writes placeholders/notes)
+# - flexible covariate table columns
+# - sample ID normalization (drops leading zeros for numeric-only IDs, drops .1 suffix)
+#
+# EXACT outputs (must match Snakemake rule `beta`):
+#   pcoa_bray_allgroups.png
+#   pcoa_jaccard_allgroups.png
+#   pcoa_aitchison_allgroups.png
+#   pcoa_bray_oral_CH.png
+#   pcoa_bray_fecal_CH.png
+#   pcoa_bray_oral_vs_fecal_paired.png
+#   pairwise_oral_fecal_summary.csv
+#   permanova_oral_bray_with_cov.csv
+#   permanova_fecal_bray_with_cov.csv
+#   permanova_interaction_bray.csv
+#   permdisp_oral_bray.csv
+#   permdisp_fecal_bray.csv
+#   beta_group_distances.csv
+#
+# CLI (from Snakefile):
+#   --oral-crohn    PATH
+#   --fecal-crohn   PATH
+#   --oral-healthy  PATH
+#   --fecal-healthy PATH
+#   --covariates    PATH
+#   --pairs         PATH
+#   --colors        PATH
+#   --outdir        PATH
+#   --pseudocount   NUM    (default 1e-6)
+#   --permutations  INT    (default 999)
+# =============================================================================
 
 suppressPackageStartupMessages({
-  library(vegan)
-  library(ggplot2)
-  library(dplyr)
-  library(tidyr)
-  library(readr)
-  library(yaml)
+  library(readr); library(dplyr); library(tidyr); library(ggplot2)
+  library(vegan); library(stringr); library(purrr); library(yaml)
 })
 
-set.seed(42)
-
-# ---- Load color config from YAML ----
-cfg <- yaml.load_file("config.yaml")
-pal_cfg <- unlist(cfg$colors)
-
-get_group_colors <- function(order) {
-  cols <- pal_cfg[order]
-  if (any(is.na(cols))) stop("Missing color(s) in config.yaml for: ",
-                             paste(order[is.na(cols)], collapse=", "))
-  names(cols) <- order
-  cols
+# ---------------------------- CLI parsing -------------------------------
+args <- commandArgs(trailingOnly = TRUE)
+get_arg <- function(flag, default = NULL) {
+  i <- which(args == flag)
+  if (length(i) == 1 && i < length(args)) args[i + 1] else default
 }
 
-# ---- Parse arguments from Snakemake ----
-args <- commandArgs(trailingOnly=TRUE)
-if (length(args) != 6) {
-  stop("Expected 6 args: oral_file fecal_file healthy_oral_file healthy_fecal_file matched_file outdir")
-}
-oral_file        <- args[1]
-fecal_file       <- args[2]
-healthy_oral_file<- args[3]
-healthy_fecal_file<-args[4]
-matched_file     <- args[5]
-outdir           <- args[6]
-dir.create(outdir, showWarnings=FALSE, recursive=TRUE)
+oral_crohn_path    <- get_arg("--oral-crohn")
+fecal_crohn_path   <- get_arg("--fecal-crohn")
+oral_healthy_path  <- get_arg("--oral-healthy")
+fecal_healthy_path <- get_arg("--fecal-healthy")
+covars_path        <- get_arg("--covariates")
+pairs_path         <- get_arg("--pairs")
+colors_path        <- get_arg("--colors")
+outdir             <- get_arg("--outdir", "results/beta_models")
+pseudo             <- as.numeric(get_arg("--pseudocount", "1e-6"))
+nperm              <- as.integer(get_arg("--permutations", "999"))
 
-# ---- Load input data ----
-oral          <- read.csv(oral_file, row.names=1, check.names=FALSE)
-fecal         <- read.csv(fecal_file, row.names=1, check.names=FALSE)
-healthy_oral  <- read.csv(healthy_oral_file, row.names=1, check.names=FALSE)
-healthy_fecal <- read.csv(healthy_fecal_file, row.names=1, check.names=FALSE)
-matched       <- read.csv(matched_file)
+dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+dbgdir <- file.path(outdir, "debug"); dir.create(dbgdir, showWarnings = FALSE)
 
-stopifnot(all(matched$Oral_col  %in% colnames(oral)))
-stopifnot(all(matched$Fecal_col %in% colnames(fecal)))
+# ---------------------------- Safe helpers ------------------------------
+`%||%` <- function(a,b) if (is.null(a) || is.na(a) || (is.character(a) && !nzchar(a))) b else a
 
-# ---- Align features across tables ----
-align_features <- function(df_list) {
-  common <- Reduce(intersect, lapply(df_list, rownames))
-  lapply(df_list, function(df) df[common, , drop=FALSE])
+save_placeholder_png <- function(path, msg="Insufficient data") {
+  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+  g <- ggplot() + theme_void() + annotate("text", 0, 0, label = msg, size = 5)
+  ggsave(path, g, width = 6, height = 5, dpi = 300, bg = "white")
 }
 
-# ---- PCoA helpers ----
-axis_labels <- function(ord) {
-  eig <- ord$eig
-  pcv <- eig / sum(eig)
-  c(
-    paste0("PCoA 1 (", sprintf("%.1f", pcv[1]*100), "%)"),
-    paste0("PCoA 2 (", sprintf("%.1f", pcv[2]*100), "%)")
+write_note_csv <- function(path, note="no_data") {
+  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+  write_csv(tibble(note = note), path)
+}
+
+# ---------------------------- Colors loader -----------------------------
+load_group_colors <- function(yaml_path) {
+  defaults <- c(
+    "Crohn-Oral"    = "#B499E5",
+    "Healthy-Oral"  = "#7FB3D5",
+    "Crohn-Fecal"   = "#78688E",
+    "Healthy-Fecal" = "#416388"
   )
-}
+  if (is.null(yaml_path) || !file.exists(yaml_path)) return(defaults)
+  cfg <- tryCatch(yaml::read_yaml(yaml_path), error = function(e) NULL)
+  if (is.null(cfg)) return(defaults)
 
-pcoa_and_plot <- function(df, sample_labels, method, filename, title, color_order=NULL, highlight=NULL) {
-  d   <- t(df)
-  dis <- vegan::vegdist(d, method=method)
-  ord <- cmdscale(dis, eig=TRUE, k=2)
-  labs <- axis_labels(ord)
+  # Schema A: legacy colors: { Crohn-Oral: "#...", ... }
+  if (!is.null(cfg$colors)) {
+    cols <- cfg$colors
+    get1 <- function(name) {
+      v <- tryCatch(if (is.list(cols)) cols[[name]] else cols[name], error = function(e) NULL)
+      v <- if (is.null(v)) NULL else as.character(v)[1]
+      if (is.null(v) || is.na(v) || !nzchar(v)) NULL else v
+    }
+    return(c(
+      "Crohn-Oral"    = get1("Crohn-Oral")    %||% defaults[["Crohn-Oral"]],
+      "Healthy-Oral"  = get1("Healthy-Oral")  %||% defaults[["Healthy-Oral"]],
+      "Crohn-Fecal"   = get1("Crohn-Fecal")   %||% defaults[["Crohn-Fecal"]],
+      "Healthy-Fecal" = get1("Healthy-Fecal") %||% defaults[["Healthy-Fecal"]]
+    ))
+  }
 
-  groups <- unique(sample_labels)
-  pcoa_df <- data.frame(
-    Sample = rownames(d),
-    Axis1  = ord$points[,1],
-    Axis2  = ord$points[,2],
-    Group  = sample_labels
+  # Schema B: group + synonyms
+  group <- cfg$group; syn <- cfg$synonyms
+  safe_get <- function(container, key) {
+    if (is.null(container)) return(NULL)
+    if (is.list(container)) container[[key]]
+    else if (is.atomic(container)) {
+      nms <- names(container)
+      if (!is.null(nms) && key %in% nms) container[[key]] else NULL
+    } else NULL
+  }
+  pick <- function(primary, fallbacks) {
+    v <- safe_get(group, primary); v <- if (is.null(v)) NULL else as.character(v)[1]
+    if (!is.null(v) && nzchar(v)) return(v)
+    syn_list <- safe_get(syn, primary); syn_list <- as.character(unlist(syn_list))
+    if (length(syn_list)) for (alias in syn_list) {
+      v <- safe_get(group, alias); v <- if (is.null(v)) NULL else as.character(v)[1]
+      if (!is.null(v) && nzchar(v)) return(v)
+    }
+    for (alias in fallbacks) {
+      v <- safe_get(group, alias); v <- if (is.null(v)) NULL else as.character(v)[1]
+      if (!is.null(v) && nzchar(v)) return(v)
+    }
+    NA_character_
+  }
+  out <- c(
+    "Crohn-Oral"    = pick("Oral_Crohn",    c("Crohn-Oral","Oral_Crohn")),
+    "Healthy-Oral"  = pick("Oral_Healthy",  c("Healthy-Oral","Oral_Healthy")),
+    "Crohn-Fecal"   = pick("Fecal_Crohn",   c("Crohn-Fecal","Fecal_Crohn")),
+    "Healthy-Fecal" = pick("Fecal_Healthy", c("Healthy-Fecal","Fecal_Healthy"))
   )
+  out[is.na(out) | out==""] <- defaults[names(out)[is.na(out) | out==""]]
+  out
+}
+pal_named <- load_group_colors(colors_path)
 
-  use_order <- if (!is.null(color_order)) color_order else groups
-  pal <- get_group_colors(use_order)
-
-  alpha_map <- setNames(rep(0.65, length(use_order)), use_order)
-  if (!is.null(highlight)) alpha_map[highlight] <- 1
-
-  p <- ggplot(pcoa_df, aes(x=Axis1, y=Axis2, color=Group, fill=Group, alpha=Group)) +
-    geom_point(size=3) +
-    stat_ellipse(type="norm", linetype=2, linewidth=1, alpha=0.15, aes(group=Group)) +
-    labs(title=title, x=labs[1], y=labs[2]) +
-    theme_minimal(base_size=15) +
-    theme(panel.background = element_rect(fill='white', color='white'),
-          plot.background  = element_rect(fill='white', color='white'),
-          legend.title     = element_blank()) +
-    scale_color_manual(values=pal) +
-    scale_fill_manual(values=pal) +
-    scale_alpha_manual(values=alpha_map)
-  ggsave(filename=file.path(outdir, filename), plot=p, width=6, height=5, dpi=300, bg="white")
-  list(dist=dis, pcoa_df=pcoa_df)
+# ---------------------------- ID normalization --------------------------
+normalize_id <- function(x) {
+  x <- gsub("\\.\\d+$", "", x)         # drop replicate suffix like .1
+  if (grepl("^[0-9]+$", x)) x <- sub("^0+", "", x)  # drop leading zeros for numeric-only IDs
+  toupper(x)
 }
 
-pcoa_and_plot_lines <- function(df, sample_labels, method, filename, title, color_order=NULL, highlight=NULL, pair_indices=NULL) {
-  d   <- t(df)
-  dis <- vegan::vegdist(d, method=method)
-  ord <- cmdscale(dis, eig=TRUE, k=2)
-  labs <- axis_labels(ord)
+# ---------------------------- IO: abundances -----------------------------
+safe_read_csv <- function(p) {
+  if (is.null(p) || !file.exists(p)) return(tibble())
+  suppressMessages(readr::read_csv(p, show_col_types = FALSE))
+}
 
-  groups <- unique(sample_labels)
-  pcoa_df <- data.frame(
-    Sample = rownames(d),
-    Axis1  = ord$points[,1],
-    Axis2  = ord$points[,2],
-    Group  = sample_labels,
-    Pair   = pair_indices
+# Expect: first column features/taxa, remaining columns samples; values numeric (already normalized/filtered)
+read_abund_matrix <- function(path, pseudo = 0) {
+  df <- safe_read_csv(path)
+  if (nrow(df) == 0) return(NULL)
+  rn <- df[[1]]
+  M  <- as.matrix(df[,-1, drop = FALSE]); storage.mode(M) <- "numeric"
+  rownames(M) <- make.unique(as.character(rn))
+  colnames(M) <- make.unique(vapply(colnames(df)[-1], normalize_id, character(1)))
+  if (is.finite(pseudo) && pseudo > 0) M <- M + pseudo
+  keepC <- colSums(M, na.rm = TRUE) > 0
+  keepR <- rowSums(M, na.rm = TRUE) > 0
+  M[keepR, keepC, drop = FALSE]
+}
+
+align_features <- function(lst) {
+  lst <- lst[!vapply(lst, is.null, TRUE)]
+  if (!length(lst)) return(lst)
+  common <- Reduce(intersect, lapply(lst, rownames))
+  lapply(lst, function(m) m[common, , drop = FALSE])
+}
+
+drop_bad_for_dist <- function(M, method) {
+  if (is.null(M)) return(NULL)
+  keep <- colSums(M, na.rm = TRUE) > 0
+  M <- M[, keep, drop = FALSE]
+  if (ncol(M) < 3) return(M)
+  D  <- suppressWarnings(vegan::vegdist(t(M), method = method))
+  dm <- as.matrix(D)
+  good <- rowSums(is.na(dm)) == 0
+  M[, good, drop = FALSE]
+}
+
+clr_matrix <- function(X, pseudo = 1e-6) {
+  X <- as.matrix(X); X <- sweep(X, 2, colSums(X), "/")
+  X[X <= 0] <- pseudo
+  L  <- log(X); gm <- matrix(rowMeans(L), nrow = nrow(L), ncol = ncol(L))
+  L - gm
+}
+
+mk_aitchison <- function(M, pseudo) {
+  if (is.null(M) || ncol(M) < 3) return(list(D=NULL, labs=character()))
+  Xclr <- clr_matrix(M, pseudo)
+  list(D = stats::dist(t(Xclr), method = "euclidean"), labs = colnames(M))
+}
+
+mk_dist <- function(M, method) {
+  if (is.null(M) || ncol(M) < 3) return(list(D=NULL, labs=character()))
+  D  <- suppressWarnings(vegan::vegdist(t(M), method = method))
+  dm <- as.matrix(D)
+  good <- rowSums(is.na(dm)) == 0
+  if (!any(good)) return(list(D=NULL, labs=character()))
+  list(D = stats::as.dist(dm[good, good, drop = FALSE]), labs = colnames(M)[good])
+}
+
+# ---------------------------- PCoA plotting -----------------------------
+pct_from_cmdscale <- function(ord) {
+  if (is.null(ord$eig) || all(is.na(ord$eig))) return(c(NA, NA))
+  vals <- ord$eig; keep <- which(vals > 0); if (!length(keep)) keep <- seq_along(vals)
+  p <- vals / sum(abs(vals)); p[1:2] * 100
+}
+
+pcoa_plot <- function(D, lab_factor, png_file, title_txt, palette_named) {
+  if (is.null(D) || length(D) == 0) { save_placeholder_png(png_file); return(invisible(NULL)) }
+  ord  <- cmdscale(D, eig = TRUE, k = 2)
+  labs <- labels(D)
+  df <- tibble(Axis1 = ord$points[,1], Axis2 = ord$points[,2],
+               Group = factor(lab_factor[labs], levels = names(palette_named)))
+  pp <- pct_from_cmdscale(ord)
+  lx <- ifelse(is.na(pp[1]), "PCoA 1", sprintf("PCoA 1 (%.1f%%)", pp[1]))
+  ly <- ifelse(is.na(pp[2]), "PCoA 2", sprintf("PCoA 2 (%.1f%%)", pp[2]))
+  pal_use <- palette_named[names(palette_named) %in% levels(df$Group)]
+  g <- ggplot(df, aes(Axis1, Axis2, color = Group, fill = Group)) +
+    geom_point(size = 2, alpha = 0.9) +
+    { if (nrow(df) >= 6 && dplyr::n_distinct(df$Group) >= 2) stat_ellipse(type="norm", linewidth=0.6, alpha=0.12) else NULL } +
+    scale_color_manual(values = pal_use, drop = FALSE) +
+    scale_fill_manual(values = pal_use, drop = FALSE) +
+    theme_bw(base_size = 12) + coord_equal() +
+    labs(title = title_txt, x = lx, y = ly)
+  ggsave(png_file, g, width = 6, height = 5, dpi = 300, bg = "white")
+  invisible(NULL)
+}
+
+pcoa_plot_paired_lines <- function(D, pairs_df, png_file, title_txt, color_oral="#B499E5", color_fecal="#78688E") {
+  if (is.null(D) || length(D) == 0 || nrow(pairs_df) == 0) { save_placeholder_png(png_file); return(invisible(NULL)) }
+  ord  <- cmdscale(D, eig = TRUE, k = 2)
+  labs <- labels(D)
+  df <- tibble(Sample_ID = labs, Axis1 = ord$points[,1], Axis2 = ord$points[,2])
+
+  # join oral/fecal positions -- (✨ اینجا قبلاً یک ) اضافه بود)
+  seg_df <- pairs_df %>%
+    inner_join(df, by = c("oral" = "Sample_ID"))  %>%
+    rename(o1 = Axis1, o2 = Axis2) %>%
+    inner_join(df, by = c("fecal" = "Sample_ID")) %>%
+    rename(f1 = Axis1, f2 = Axis2)
+
+  g <- ggplot() +
+    geom_segment(data = seg_df, aes(x = o1, y = o2, xend = f1, yend = f2),
+                 color = "grey60", linewidth = 0.6, alpha = 0.7) +
+    geom_point(data = df %>% filter(Sample_ID %in% pairs_df$oral),
+               aes(Axis1, Axis2), color = color_oral, size = 2.2) +
+    geom_point(data = df %>% filter(Sample_ID %in% pairs_df$fecal),
+               aes(Axis1, Axis2), color = color_fecal, size = 2.2) +
+    theme_bw(base_size = 12) + coord_equal() +
+    labs(title = title_txt, x = "PCoA 1", y = "PCoA 2")
+  ggsave(png_file, g, width = 6, height = 5, dpi = 300, bg = "white")
+  invisible(NULL)
+}
+
+# ---------------------------- Covariates & pairs ------------------------
+COV_CANDS <- c("Age","Sex","BMI","Smoking","Antibiotics_3m","PPI_use","Steroids_ongoing","Immuno_ongoing")
+
+read_covariates_robust <- function(path) {
+  cv <- safe_read_csv(path)
+  if (nrow(cv) == 0) return(tibble())
+  # flexible renaming
+  id_col  <- intersect(c("Sample_ID","SampleID","sample_id","Sample","sample","ID","id","Sample.Name","SampleName"), names(cv))[1]
+  site_col<- intersect(c("site","Site","type","Type","SITE"), names(cv))[1]
+  dis_col <- intersect(c("disease","Disease","status","Status","phenotype","Phenotype","group","Group","cohort","Cohort","label","Label"), names(cv))[1]
+
+  map_site <- function(x) {
+    y <- tolower(trimws(as.character(x)))
+    case_when(
+      str_detect(y, "oral|mouth|saliva|buccal") ~ "oral",
+      str_detect(y, "fecal|faecal|stool") ~ "fecal",
+      TRUE ~ NA_character_
+    )
+  }
+  map_dis <- function(x) {
+    y <- tolower(trimws(as.character(x)))
+    case_when(
+      y %in% c("1","yes","true","crohn","cd","case","patient","ibd","disease","crohn-oral","crohn-fecal") ~ 1L,
+      y %in% c("0","no","false","healthy","control","healthy-oral","healthy-fecal") ~ 0L,
+      str_detect(y, "crohn|cd|case|patient") ~ 1L,
+      str_detect(y, "healthy|control") ~ 0L,
+      TRUE ~ NA_integer_
+    )
+  }
+
+  md <- tibble(
+    Sample_ID = if (!is.na(id_col)) as.character(cv[[id_col]]) else NA_character_,
+    site      = if (!is.na(site_col)) map_site(cv[[site_col]]) else NA_character_,
+    disease   = if (!is.na(dis_col))  map_dis(cv[[dis_col]])  else NA_integer_
   )
-
-  use_order <- if (!is.null(color_order)) color_order else groups
-  pal <- get_group_colors(use_order)
-
-  alpha_map <- setNames(rep(0.65, length(use_order)), use_order)
-  if (!is.null(highlight)) alpha_map[highlight] <- 1
-
-  p <- ggplot(pcoa_df, aes(x=Axis1, y=Axis2, color=Group, fill=Group, alpha=Group)) +
-    geom_line(aes(group=Pair), color="grey60", linewidth=0.65, alpha=0.45, show.legend=FALSE) +
-    geom_point(size=3) +
-    stat_ellipse(type="norm", linetype=2, linewidth=1, alpha=0.15, aes(group=Group)) +
-    labs(title=title, x=labs[1], y=labs[2]) +
-    theme_minimal(base_size=15) +
-    theme(panel.background = element_rect(fill='white', color='white'),
-          plot.background  = element_rect(fill='white', color='white'),
-          legend.title     = element_blank()) +
-    scale_color_manual(values=pal) +
-    scale_fill_manual(values=pal) +
-    scale_alpha_manual(values=alpha_map)
-  ggsave(filename=file.path(outdir, filename), plot=p, width=6, height=5, dpi=300, bg="white")
-  list(dist=dis, pcoa_df=pcoa_df)
+  md <- bind_cols(md, cv %>% select(any_of(COV_CANDS)))
+  md <- md %>% mutate(Sample_ID = vapply(Sample_ID, normalize_id, character(1))) %>% distinct()
+  md
 }
 
-# =========================
-#  PCoA COMPARISONS
-# =========================
-
-# 1) Crohn Oral vs Healthy Oral
-list_oh <- align_features(list(oral, healthy_oral))
-oral_oh    <- list_oh[[1]]
-healthy_oh <- list_oh[[2]]
-mat_oh <- cbind(oral_oh, healthy_oh)
-labels_oh <- c(rep("Crohn-Oral", ncol(oral_oh)), rep("Healthy-Oral", ncol(healthy_oh)))
-
-bray_oh <- pcoa_and_plot(mat_oh, labels_oh, "bray",
-                         "pcoa_bray_oral_vs_healthy.png",
-                         "PCoA (Bray) Crohn Oral vs Healthy Oral",
-                         c("Crohn-Oral","Healthy-Oral"),
-                         highlight="Crohn-Oral")
-jacc_oh <- pcoa_and_plot(mat_oh, labels_oh, "jaccard",
-                         "pcoa_jaccard_oral_vs_healthy.png",
-                         "PCoA (Jaccard) Crohn Oral vs Healthy Oral",
-                         c("Crohn-Oral","Healthy-Oral"),
-                         highlight="Crohn-Oral")
-
-# 2) Crohn Fecal vs Healthy Fecal
-list_fh <- align_features(list(fecal, healthy_fecal))
-fecal_fh    <- list_fh[[1]]
-healthy_fh  <- list_fh[[2]]
-mat_fh <- cbind(fecal_fh, healthy_fh)
-labels_fh <- c(rep("Crohn-Fecal", ncol(fecal_fh)), rep("Healthy-Fecal", ncol(healthy_fh)))
-
-bray_fh <- pcoa_and_plot(mat_fh, labels_fh, "bray",
-                         "pcoa_bray_fecal_vs_healthyfecal.png",
-                         "PCoA (Bray) Crohn Fecal vs Healthy Fecal",
-                         c("Crohn-Fecal","Healthy-Fecal"),
-                         highlight="Crohn-Fecal")
-jacc_fh <- pcoa_and_plot(mat_fh, labels_fh, "jaccard",
-                         "pcoa_jaccard_fecal_vs_healthyfecal.png",
-                         "PCoA (Jaccard) Crohn Fecal vs Healthy Fecal",
-                         c("Crohn-Fecal","Healthy-Fecal"),
-                         highlight="Crohn-Fecal")
-
-# 3) Crohn Oral vs Crohn Fecal (paired, WITH lines)
-list_of <- align_features(list(oral, fecal))
-oral_of_mat  <- list_of[[1]][, matched$Oral_col,  drop=FALSE]
-fecal_of_mat <- list_of[[2]][, matched$Fecal_col, drop=FALSE]
-mat_of <- cbind(oral_of_mat, fecal_of_mat)
-labels_of <- c(rep("Crohn-Oral", ncol(oral_of_mat)), rep("Crohn-Fecal", ncol(fecal_of_mat)))
-pair_idx <- rep(seq_len(ncol(oral_of_mat)), 2)
-
-bray_of <- pcoa_and_plot_lines(mat_of, labels_of, "bray",
-                               "pcoa_bray_oral_vs_fecal.png",
-                               "PCoA (Bray) Crohn Oral vs Fecal (paired)",
-                               c("Crohn-Oral","Crohn-Fecal"),
-                               highlight="Crohn-Fecal",
-                               pair_indices=pair_idx)
-jacc_of <- pcoa_and_plot_lines(mat_of, labels_of, "jaccard",
-                               "pcoa_jaccard_oral_vs_fecal.png",
-                               "PCoA (Jaccard) Crohn Oral vs Fecal (paired)",
-                               c("Crohn-Oral","Crohn-Fecal"),
-                               highlight="Crohn-Fecal",
-                               pair_indices=pair_idx)
-
-# 4) All groups (NO lines) – 4 groups now
-list_all <- align_features(list(oral, fecal, healthy_oral, healthy_fecal))
-oral_all    <- list_all[[1]]
-fecal_all   <- list_all[[2]]
-healthy_all <- list_all[[3]]
-healthy_f_all <- list_all[[4]]
-all_mat <- cbind(oral_all, fecal_all, healthy_all, healthy_f_all)
-all_labels <- c(rep("Crohn-Oral",    ncol(oral_all)),
-                rep("Crohn-Fecal",   ncol(fecal_all)),
-                rep("Healthy-Oral",  ncol(healthy_all)),
-                rep("Healthy-Fecal", ncol(healthy_f_all)))
-
-bray_all <- pcoa_and_plot(all_mat, all_labels, "bray",
-                          "pcoa_bray_allgroups.png",
-                          "PCoA (Bray) All Groups",
-                          c("Crohn-Oral","Crohn-Fecal","Healthy-Oral","Healthy-Fecal"),
-                          highlight="Crohn-Oral")
-jacc_all <- pcoa_and_plot(all_mat, all_labels, "jaccard",
-                          "pcoa_jaccard_allgroups.png",
-                          "PCoA (Jaccard) All Groups",
-                          c("Crohn-Oral","Crohn-Fecal","Healthy-Oral","Healthy-Fecal"),
-                          highlight="Crohn-Oral")
-
-# =========================
-#  PERMANOVA + PERMDISP
-# =========================
-
-write_permanova <- function(dist, groups, filepath, title){
-  md <- data.frame(group=groups)
-  res <- adonis2(dist ~ group, data=md, permutations=999)
-  line <- capture.output({
-    cat(title, "\n")
-    print(res)
-    cat("\nKey: F=", round(res$F[1], 3), " R2=", round(res$R2[1], 3),
-        " p=", signif(res$`Pr(>F)`[1], 4), "\n", sep="")
-  })
-  writeLines(line, filepath)
+read_pairs <- function(path) {
+  P <- safe_read_csv(path)
+  if (nrow(P) == 0) return(tibble(STUDY_ID=character(), oral=character(), fecal=character()))
+  nm <- names(P)
+  pick <- function(cands) { cand <- intersect(cands, nm); if (length(cand)) cand[[1]] else NA_character_ }
+  sid <- pick(c("STUDY_ID","Study_ID","subject","Subject","ID","id"))
+  oc  <- pick(c("oral","Oral","Oral_ID","oral_id","Oral_col","Oral.col","Oral_Sample_ID"))
+  fc  <- pick(c("fecal","Fecal","Fecal_ID","fecal_id","Fecal_col","Fecal.col","Fecal_Sample_ID"))
+  if (is.na(oc) || is.na(fc)) return(tibble(STUDY_ID=character(), oral=character(), fecal=character()))
+  tibble(
+    STUDY_ID = if (!is.na(sid)) as.character(P[[sid]]) else NA_character_,
+    oral     = vapply(as.character(P[[oc]]), normalize_id, character(1)),
+    fecal    = vapply(as.character(P[[fc]]), normalize_id, character(1))
+  ) %>% filter(!is.na(oral), !is.na(fecal))
 }
 
-write_permdisp <- function(dist, groups, filepath, title){
-  md <- data.frame(group=groups)
-  bd <- betadisper(dist, md$group)
-  perm <- permutest(bd, permutations=999)
-  line <- capture.output({
-    cat(title, "\n")
-    print(perm)
-  })
-  writeLines(line, filepath)
+# ---------------------------- PERMANOVA helpers -------------------------
+permanova_with_cov <- function(M_case, M_ctrl, site_name, covars, out_csv, permutations=999) {
+  if (is.null(M_case) || is.null(M_ctrl)) { write_note_csv(out_csv, "no_matrix"); return(invisible(NULL)) }
+  lst <- align_features(list(M_case, M_ctrl))
+  if (length(lst) < 2) { write_note_csv(out_csv, "no_common_features"); return(invisible(NULL)) }
+  M_case <- lst[[1]]; M_ctrl <- lst[[2]]
+  M <- cbind(M_case, M_ctrl)
+  labs <- colnames(M)
+  md <- covars %>% filter(tolower(site) == tolower(site_name)) %>% filter(Sample_ID %in% labs)
+  if (nrow(md) < 3 || dplyr::n_distinct(md$disease) < 2) { write_note_csv(out_csv, "insufficient_md"); return(invisible(NULL)) }
+
+  # Bray
+  Mb <- drop_bad_for_dist(M[, md$Sample_ID, drop=FALSE], "bray")
+  if (is.null(Mb) || ncol(Mb) < 3) { write_note_csv(out_csv, "too_few_columns"); return(invisible(NULL)) }
+  Db <- mk_dist(Mb, "bray")$D
+  if (is.null(Db)) { write_note_csv(out_csv, "dist_null"); return(invisible(NULL)) }
+
+  labs_b <- labels(Db); md_b <- md[match(labs_b, md$Sample_ID), , drop = FALSE]
+
+  # choose covariates that are present & variable
+  usable <- c()
+  for (v in intersect(COV_CANDS, names(md_b))) {
+    vv <- md_b[[v]]
+    if (sum(!is.na(vv)) >= 3 && dplyr::n_distinct(vv, na.rm=TRUE) >= 2) usable <- c(usable, v)
+  }
+  rhs <- paste(c("disease", usable), collapse = " + ")
+  fml <- stats::as.formula(paste("Db ~", rhs))
+  res <- vegan::adonis2(fml, data = md_b, permutations = permutations, by = "margin")
+  out <- as.data.frame(res); out$term <- rownames(out); rownames(out) <- NULL
+  out <- out %>% rename(Df=Df, SumOfSqs=SumOfSqs, R2=R2, F=`F`, p=`Pr(>F)`) %>% select(term, Df, SumOfSqs, R2, F, p)
+  write_csv(out, out_csv)
 }
 
-# Crohn Oral vs Healthy Oral
-write_permanova(bray_oh$dist, labels_oh,
-                file.path(outdir,"permanova_oral_CH_bray.txt"),
-                "PERMANOVA (Bray) Crohn-Oral vs Healthy-Oral")
-write_permanova(jacc_oh$dist, labels_oh,
-                file.path(outdir,"permanova_oral_CH_jaccard.txt"),
-                "PERMANOVA (Jaccard) Crohn-Oral vs Healthy-Oral")
+permanova_interaction_bray <- function(M_oral, M_fecal, covars, out_csv, permutations=999) {
+  if (is.null(M_oral) || is.null(M_fecal)) { write_note_csv(out_csv, "no_matrix"); return(invisible(NULL)) }
+  lst <- align_features(list(M_oral, M_fecal))
+  if (length(lst) < 2) { write_note_csv(out_csv, "no_common_features"); return(invisible(NULL)) }
+  M_oral <- lst[[1]]; M_fecal <- lst[[2]]
+  M <- cbind(M_oral, M_fecal)
+  labs <- colnames(M)
 
-# Crohn Fecal vs Healthy Fecal
-write_permanova(bray_fh$dist, labels_fh,
-                file.path(outdir,"permanova_fecal_CH_bray.txt"),
-                "PERMANOVA (Bray) Crohn-Fecal vs Healthy-Fecal")
-write_permanova(jacc_fh$dist, labels_fh,
-                file.path(outdir,"permanova_fecal_CH_jaccard.txt"),
-                "PERMANOVA (Jaccard) Crohn-Fecal vs Healthy-Fecal")
+  md <- covars %>% filter(Sample_ID %in% labs) %>%
+    mutate(site = ifelse(tolower(site)=="oral","oral", ifelse(tolower(site)=="fecal","fecal", NA_character_))) %>%
+    filter(!is.na(site))
+  if (nrow(md) < 6 || dplyr::n_distinct(md$disease) < 2 || dplyr::n_distinct(md$site) < 2) {
+    write_note_csv(out_csv, "insufficient_md"); return(invisible(NULL))
+  }
 
-# Crohn Oral vs Crohn Fecal (SITE effect within Crohn)
-site_labels <- factor(c(rep("Oral",  ncol(oral_of_mat)),
-                        rep("Fecal", ncol(fecal_of_mat))),
-                      levels=c("Oral","Fecal"))
+  Mb <- drop_bad_for_dist(M[, md$Sample_ID, drop=FALSE], "bray")
+  if (is.null(Mb) || ncol(Mb) < 3) { write_note_csv(out_csv, "too_few_columns"); return(invisible(NULL)) }
+  Db <- mk_dist(Mb, "bray")$D
+  if (is.null(Db)) { write_note_csv(out_csv, "dist_null"); return(invisible(NULL)) }
 
-write_permanova(bray_of$dist, site_labels,
-                file.path(outdir,"permanova_site_bray.txt"),
-                "PERMANOVA (Bray) Site effect (Crohn Oral vs Fecal)")
-write_permanova(jacc_of$dist, site_labels,
-                file.path(outdir,"permanova_site_jaccard.txt"),
-                "PERMANOVA (Jaccard) Site effect (Crohn Oral vs Fecal)")
-
-# PERMDISP for SITE (Crohn pairs)
-write_permdisp(bray_of$dist, site_labels,
-               file.path(outdir,"permdisp_site_bray.txt"),
-               "PERMDISP (Bray) Site effect (Crohn Oral vs Fecal)")
-write_permdisp(jacc_of$dist, site_labels,
-               file.path(outdir,"permdisp_site_jaccard.txt"),
-               "PERMDISP (Jaccard) Site effect (Crohn Oral vs Fecal)")
-
-# Summary file
-sink(file.path(outdir, "beta_stats.txt"))
-cat("## Beta Diversity Statistical Tests\n\n")
-cat("Crohn Oral vs Healthy Oral (Bray/Jaccard)\n")
-print(adonis2(bray_oh$dist ~ labels_oh, permutations=999))
-print(adonis2(jacc_oh$dist ~ labels_oh, permutations=999))
-
-cat("\nCrohn Fecal vs Healthy Fecal (Bray/Jaccard)\n")
-print(adonis2(bray_fh$dist ~ labels_fh, permutations=999))
-print(adonis2(jacc_fh$dist ~ labels_fh, permutations=999))
-
-cat("\nCrohn Oral vs Crohn Fecal (Bray/Jaccard)\n")
-print(adonis2(bray_of$dist ~ site_labels, permutations=999))
-print(adonis2(jacc_of$dist ~ site_labels, permutations=999))
-
-cat("\nAll Groups (Bray/Jaccard)\n")
-print(adonis2(bray_all$dist ~ all_labels, permutations=999))
-print(adonis2(jacc_all$dist ~ all_labels, permutations=999))
-sink()
-
-# Save all-groups Bray distance matrix (now 4 groups)
-write.csv(as.matrix(bray_all$dist), file.path(outdir, "beta_group_distances.csv"))
-
-# =========================
-#  PAIRED ORAL–FECAL DISTANCES (Crohn)
-# =========================
-
-pairwise_bray    <- numeric(ncol(oral_of_mat))
-pairwise_jaccard <- numeric(ncol(oral_of_mat))
-for (i in seq_len(ncol(oral_of_mat))) {
-  o <- as.numeric(oral_of_mat[, i])
-  f <- as.numeric(fecal_of_mat[, i])
-  pairwise_bray[i]    <- vegan::vegdist(rbind(o, f), method = "bray")[1]
-  pairwise_jaccard[i] <- vegan::vegdist(rbind(o, f), method = "jaccard")[1]
+  labs_b <- labels(Db); md_b <- md[match(labs_b, md$Sample_ID), , drop = FALSE]
+  # covariates
+  usable <- c()
+  for (v in intersect(COV_CANDS, names(md_b))) {
+    vv <- md_b[[v]]
+    if (sum(!is.na(vv)) >= 3 && dplyr::n_distinct(vv, na.rm=TRUE) >= 2) usable <- c(usable, v)
+  }
+  rhs <- paste(c("disease * site", usable), collapse = " + ")
+  fml <- stats::as.formula(paste("Db ~", rhs))
+  res <- vegan::adonis2(fml, data = md_b, permutations = permutations, by = "margin")
+  out <- as.data.frame(res); out$term <- rownames(out); rownames(out) <- NULL
+  out <- out %>% rename(Df=Df, SumOfSqs=SumOfSqs, R2=R2, F=`F`, p=`Pr(>F)`) %>% select(term, Df, SumOfSqs, R2, F, p)
+  write_csv(out, out_csv)
 }
 
-pairwise_df <- data.frame(
-  STUDY_ID   = matched$STUDY_ID,
-  BrayCurtis = pairwise_bray,
-  Jaccard    = pairwise_jaccard
-)
-write.csv(pairwise_df,
-          file.path(outdir, "pairwise_oral_fecal_distances.csv"),
-          row.names = FALSE)
+permdisp_bray <- function(M_case, M_ctrl, covars, site_name, out_csv) {
+  if (is.null(M_case) || is.null(M_ctrl)) { write_note_csv(out_csv, "no_matrix"); return(invisible(NULL)) }
+  lst <- align_features(list(M_case, M_ctrl))
+  if (length(lst) < 2) { write_note_csv(out_csv, "no_common_features"); return(invisible(NULL)) }
+  M_case <- lst[[1]]; M_ctrl <- lst[[2]]
+  M <- cbind(M_case, M_ctrl)
+  labs <- colnames(M)
+  md <- covars %>% filter(tolower(site) == tolower(site_name), Sample_ID %in% labs)
+  if (nrow(md) < 3 || dplyr::n_distinct(md$disease) < 2) { write_note_csv(out_csv, "insufficient_md"); return(invisible(NULL)) }
+  Mb <- drop_bad_for_dist(M[, md$Sample_ID, drop=FALSE], "bray")
+  if (is.null(Mb) || ncol(Mb) < 3) { write_note_csv(out_csv, "too_few_columns"); return(invisible(NULL)) }
+  Db <- mk_dist(Mb, "bray")$D
+  if (is.null(Db)) { write_note_csv(out_csv, "dist_null"); return(invisible(NULL)) }
+  labs_b <- labels(Db); md_b <- md[match(labs_b, md$Sample_ID), , drop=FALSE]
+  grp <- factor(md_b$disease, levels=c(0,1), labels=c("Healthy","Crohn"))
+  bd <- betadisper(Db, grp)
+  pt <- suppressWarnings(permutest(bd, permutations = nperm))
+  out <- tibble(term = "disease", F = as.numeric(pt$tab[1, "F"]), p = as.numeric(pt$tab[1, "Pr(>F)"]))
+  write_csv(out, out_csv)
+}
 
-pairwise_long <- pairwise_df |>
-  tidyr::pivot_longer(cols = c("BrayCurtis","Jaccard"),
-                      names_to = "Metric", values_to = "Distance")
-pairwise_long$Metric <- factor(pairwise_long$Metric,
-                               levels = c("BrayCurtis","Jaccard"))
+# ---------------------------- Group distance table ----------------------
+write_group_distance_csv <- function(M_all, group_map_named, out_csv) {
+  if (is.null(M_all) || ncol(M_all) < 4) { write_note_csv(out_csv, "too_few_samples"); return(invisible(NULL)) }
+  dist_one <- function(method) {
+    Mx <- drop_bad_for_dist(M_all, method); Dx <- mk_dist(Mx, method)
+    if (is.null(Dx$D)) return(tibble())
+    dm <- as.matrix(Dx$D); labs <- Dx$labs; g <- group_map_named[labs]; lev <- unique(na.omit(g))
+    out <- list()
+    for (i in seq_along(lev)) for (j in i:length(lev)) {
+      gi <- lev[i]; gj <- lev[j]; idx <- which(g == gi); jdx <- which(g == gj)
+      if (length(idx) > 0 && length(jdx) > 0) {
+        sub <- dm[idx, jdx, drop = FALSE]; if (i == j) sub <- sub[upper.tri(sub)]
+        out[[length(out) + 1]] <- tibble(group1 = gi, group2 = gj, metric = method,
+                                         n_pairs = length(sub),
+                                         mean_distance = ifelse(length(sub) > 0, mean(sub), NA_real_))
+      }
+    }
+    bind_rows(out)
+  }
+  out <- bind_rows(dist_one("bray"), dist_one("jaccard"))
+  if (!nrow(out)) write_note_csv(out_csv, "no_pairs") else write_csv(out, out_csv)
+}
 
-pairwise_summary <- pairwise_long |>
-  dplyr::group_by(Metric) |>
-  dplyr::summarise(
-    n      = dplyr::n(),
-    mean   = mean(Distance, na.rm = TRUE),
-    median = median(Distance, na.rm = TRUE),
-    q1     = as.numeric(quantile(Distance, 0.25, na.rm = TRUE)),
-    q3     = as.numeric(quantile(Distance, 0.75, na.rm = TRUE)),
-    iqr    = IQR(Distance, na.rm = TRUE)
-  )
-readr::write_csv(pairwise_summary,
-                 file.path(outdir, "pairwise_oral_fecal_summary.csv"))
+# ---------------------------- Main workflow ----------------------------
+main <- function() {
+  # Read abundances
+  OC <- read_abund_matrix(oral_crohn_path, pseudo)
+  FC <- read_abund_matrix(fecal_crohn_path, pseudo)
+  OH <- read_abund_matrix(oral_healthy_path, pseudo)
+  FH <- read_abund_matrix(fecal_healthy_path, pseudo)
 
-# Violin plot
-p <- ggplot(pairwise_long, aes(x=Metric, y=Distance, fill=Metric)) +
-  geom_violin(trim=FALSE, alpha=0.7, width=0.7) +
-  geom_jitter(width=0.15, alpha=0.5, color="black") +
-  stat_summary(fun=median, geom="point", size=3, color="black") +
-  labs(title="Paired Oral–Fecal Beta Diversity (Crohn)", y="Distance", x="") +
-  theme_bw(base_size=14) +
-  scale_fill_manual(values=c("BrayCurtis"="#1B4F72","Jaccard"="#7FB3D5"))
-ggsave(file.path(outdir, "pairwise_oral_fecal_violinplot.png"),
-       p, width=6, height=5, dpi=300, bg="white")
+  # Align features across all (intersection to keep distance definitions consistent)
+  L <- align_features(list(OC, FC, OH, FH))
+  if (length(L) == 4) { OC <- L[[1]]; FC <- L[[2]]; OH <- L[[3]]; FH <- L[[4]] }
 
-message("[INFO] All beta-diversity outputs saved to: ", outdir)
+  # Labels for groups
+  lab_oral_c    <- setNames(rep("Crohn-Oral",    ncol(OC)), colnames(OC))
+  lab_fecal_c   <- setNames(rep("Crohn-Fecal",   ncol(FC)), colnames(FC))
+  lab_oral_h    <- setNames(rep("Healthy-Oral",  ncol(OH)), colnames(OH))
+  lab_fecal_h   <- setNames(rep("Healthy-Fecal", ncol(FH)), colnames(FH))
+  group_map_named <- c(lab_oral_c, lab_fecal_c, lab_oral_h, lab_fecal_h)
+
+  # All-groups matrices
+  M_all <- cbind(OC, FC, OH, FH)
+
+  # --- PCoA: all groups ---
+  Db_all <- mk_dist(drop_bad_for_dist(M_all, "bray"),    "bray")$D
+  Dj_all <- mk_dist(drop_bad_for_dist(M_all, "jaccard"), "jaccard")$D
+  Da_all <- mk_aitchison(drop_bad_for_dist(M_all, "bray"), pseudo)$D  # using same filtered columns
+  pcoa_plot(Db_all, group_map_named, file.path(outdir, "pcoa_bray_allgroups.png"),
+            "PCoA (Bray) — All Groups", pal_named)
+  pcoa_plot(Dj_all, group_map_named, file.path(outdir, "pcoa_jaccard_allgroups.png"),
+            "PCoA (Jaccard) — All Groups", pal_named)
+  pcoa_plot(Da_all, group_map_named, file.path(outdir, "pcoa_aitchison_allgroups.png"),
+            "PCoA (Aitchison) — All Groups", pal_named)
+
+  # --- PCoA: Crohn vs Healthy within site (Bray only, as required) ---
+  Mb_oral  <- cbind(OC, OH); Db_oral  <- mk_dist(drop_bad_for_dist(Mb_oral,  "bray"), "bray")$D
+  Mb_fecal <- cbind(FC, FH); Db_fecal <- mk_dist(drop_bad_for_dist(Mb_fecal, "bray"), "bray")$D
+  pcoa_plot(Db_oral,  c(lab_oral_c, lab_oral_h),  file.path(outdir, "pcoa_bray_oral_CH.png"),
+            "PCoA (Bray) — Crohn Oral vs Healthy Oral", pal_named[c("Crohn-Oral","Healthy-Oral")])
+  pcoa_plot(Db_fecal, c(lab_fecal_c, lab_fecal_h), file.path(outdir, "pcoa_bray_fecal_CH.png"),
+            "PCoA (Bray) — Crohn Fecal vs Healthy Fecal", pal_named[c("Crohn-Fecal","Healthy-Fecal")])
+
+  # --- Paired Crohn oral–fecal (Bray, with lines) ---
+  pairs_df <- read_pairs(pairs_path)
+  M_crohn_of <- cbind(OC, FC)
+  Db_pairs <- mk_dist(drop_bad_for_dist(M_crohn_of, "bray"), "bray")$D
+  pcoa_plot_paired_lines(Db_pairs, pairs_df,
+                         file.path(outdir, "pcoa_bray_oral_vs_fecal_paired.png"),
+                         "PCoA (Bray) — Crohn Oral vs Fecal (paired)",
+                         color_oral = pal_named[["Crohn-Oral"]],
+                         color_fecal= pal_named[["Crohn-Fecal"]])
+
+  # --- Covariates table ---
+  covars <- read_covariates_robust(covars_path)
+
+  # --- PERMANOVA with covariates (Bray) ---
+  permanova_with_cov(OC, OH, "oral",  covars, file.path(outdir, "permanova_oral_bray_with_cov.csv"),  permutations = nperm)
+  permanova_with_cov(FC, FH, "fecal", covars, file.path(outdir, "permanova_fecal_bray_with_cov.csv"), permutations = nperm)
+
+  # --- PERMANOVA interaction (disease * site) on Bray ---
+  permanova_interaction_bray(cbind(OC, OH), cbind(FC, FH), covars, file.path(outdir, "permanova_interaction_bray.csv"), permutations = nperm)
+
+  # --- PERMDISP (Bray) ---
+  permdisp_bray(OC, OH, covars, "oral",  file.path(outdir, "permdisp_oral_bray.csv"))
+  permdisp_bray(FC, FH, covars, "fecal", file.path(outdir, "permdisp_fecal_bray.csv"))
+
+  # --- Group distance table (Bray & Jaccard means within/between groups) ---
+  write_group_distance_csv(M_all, group_map_named, file.path(outdir, "beta_group_distances.csv"))
+
+  # --- Paired distances summary (Crohn oral–fecal) ---
+  if (nrow(pairs_df) > 0) {
+    lst <- align_features(list(OC, FC)); OC2 <- lst[[1]]; FC2 <- lst[[2]]
+    P <- pairs_df %>% filter(oral %in% colnames(OC2), fecal %in% colnames(FC2))
+    if (nrow(P) > 0) {
+      Mb <- cbind(OC2[, P$oral, drop=FALSE], FC2[, P$fecal, drop=FALSE])
+      Mb <- drop_bad_for_dist(Mb, "bray"); Db <- mk_dist(Mb, "bray")$D
+      if (!is.null(Db)) {
+        dm <- as.matrix(Db); labs <- labels(Db)
+        get_one <- function(o, f) if (o %in% labs && f %in% labs) dm[o, f] else NA_real_
+        dists <- mapply(get_one, P$oral, P$fecal)
+        out <- tibble(Metric="BrayCurtis", n= sum(is.finite(dists)), mean = mean(dists, na.rm=TRUE),
+                      median = median(dists, na.rm=TRUE),
+                      q1 = as.numeric(quantile(dists, 0.25, na.rm=TRUE)),
+                      q3 = as.numeric(quantile(dists, 0.75, na.rm=TRUE)),
+                      iqr = IQR(dists, na.rm=TRUE))
+        write_csv(out, file.path(outdir, "pairwise_oral_fecal_summary.csv"))
+      } else {
+        write_note_csv(file.path(outdir, "pairwise_oral_fecal_summary.csv"), "dist_null")
+      }
+    } else write_note_csv(file.path(outdir, "pairwise_oral_fecal_summary.csv"), "no_pairs_overlap")
+  } else write_note_csv(file.path(outdir, "pairwise_oral_fecal_summary.csv"), "no_pairs_file")
+
+  # Debug log
+  sink(file.path(dbgdir, "beta_session_info.txt")); print(sessionInfo()); sink()
+  writeLines(c("OK", format(Sys.time())), con = file.path(dbgdir, "done.flag"))
+}
+
+invisible(main())

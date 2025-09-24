@@ -1,0 +1,703 @@
+# ------------------------------------------------------------
+# Project: Oral/Fecal microbiome — Crohn vs Healthy
+# Orchestrates metadata building, preprocessing, filtering,
+# and analyses (alpha/beta diversity, DA at genus/species),
+# plus ML runs (within-site; genus-only; species-only).
+#
+# Notes:
+# - Python rules call CLI scripts via shell to pass arguments.
+# - R rules call a single R script that writes multiple outputs.
+# - Keep outputs in rule `all` synced with their rules.
+# - ML package lives under scripts/ml_ibd (module path).
+# ------------------------------------------------------------
+
+configfile: "config.yaml"
+
+SITES = ["oral", "fecal"]
+
+# --------------------------------------------------------------------
+# MASTER TARGETS
+# --------------------------------------------------------------------
+rule all:
+    input:
+        # --- Clinical metadata ---
+        "data/meta/crohn_metadata_core.csv",
+        "data/meta/crohn_metadata_extended.csv",
+        "data/meta/healthy_metadata.csv",
+        "data/meta/model_table_pooled.csv",
+        "data/meta/missing_ids_for_email.csv",
+
+        # --- Preprocessing outputs ---
+        "data/processed/oral_abund_crohn.csv",
+        "data/processed/fecal_abund_crohn.csv",
+        "data/processed/oral_abund_healthy.csv",
+        "data/processed/fecal_abund_healthy.csv",
+        "data/processed/matched_sample_ids.csv",
+
+        # --- Filtering outputs ---
+        "data/filtered/oral_abund_crohn_filtered_normalized.csv",
+        "data/filtered/fecal_abund_crohn_filtered_normalized.csv",
+        "data/filtered/oral_abund_healthy_filtered_normalized.csv",
+        "data/filtered/fecal_abund_healthy_filtered_normalized.csv",
+        "results/filtering/filtering_report.txt",
+        "results/filtering/filtering_barplot_allgroups.png",
+
+        # --- SPECIES-level results ---
+        "results/species_comparison/stackedbar_top15_oral_crohn_species.png",
+        "results/species_comparison/top15_oral_crohn_species.csv",
+        "results/species_comparison/stackedbar_top15_oral_healthy_species.png",
+        "results/species_comparison/top15_oral_healthy_species.csv",
+        "results/species_comparison/stackedbar_top15_fecal_crohn_species.png",
+        "results/species_comparison/top15_fecal_crohn_species.csv",
+        "results/species_comparison/stackedbar_top15_fecal_healthy_species.png",
+        "results/species_comparison/top15_fecal_healthy_species.csv",
+        "results/species_comparison/heatmap_pairs_crohn_species.png",
+        "results/species_comparison/heatmap_pairs_healthy_species.png",
+        "results/species_comparison/heatmap_group_means_species.png",
+        "results/species_comparison/heatmap_group_deltas_species.png",
+        "results/species_comparison/group_means_species.csv",
+        "results/species_comparison/group_deltas_species.csv",
+        "results/species_comparison/means_and_mean_species.csv",
+        "results/species_comparison/barplot_oral_species_top15.png",
+        "results/species_comparison/barplot_fecal_species_top15.png",
+        "results/species_comparison/da_oral_CH_species.csv",
+        "results/species_comparison/volcano_oral_CH_species.png",
+        "results/species_comparison/da_fecal_CH_species.csv",
+        "results/species_comparison/volcano_fecal_CH_species.png",
+        "results/species_comparison/da_paired_OC_FC_species.csv",
+        "results/species_comparison/clr_da_oral_CH_species.csv",
+        "results/species_comparison/clr_da_fecal_CH_species.csv",
+        "results/species_comparison/clr_da_paired_OC_FC_species.csv",
+        "results/species_comparison/top10_significant_species.csv",
+
+        # --- GENUS-level results ---
+        "results/genus_comparison/stackedbar_top10_oral_crohn.png",
+        "results/genus_comparison/top10_oral_crohn.csv",
+        "results/genus_comparison/stackedbar_top10_oral_healthy.png",
+        "results/genus_comparison/top10_oral_healthy.csv",
+        "results/genus_comparison/stackedbar_top10_fecal_crohn.png",
+        "results/genus_comparison/top10_fecal_crohn.csv",
+        "results/genus_comparison/stackedbar_top10_fecal_healthy.png",
+        "results/genus_comparison/top10_fecal_healthy.csv",
+        "results/genus_comparison/heatmap_pairs_crohn_genus.png",
+        "results/genus_comparison/heatmap_pairs_healthy_genus.png",
+        "results/genus_comparison/heatmap_group_means_genus.png",
+        "results/genus_comparison/heatmap_group_deltas_genus.png",
+        "results/genus_comparison/group_means_genus.csv",
+        "results/genus_comparison/group_deltas_genus.csv",
+        "results/genus_comparison/means_and_mean_genus.csv",
+        "results/genus_comparison/barplot_oral_genus_top10.png",
+        "results/genus_comparison/barplot_fecal_genus_top10.png",
+        "results/genus_comparison/da_oral_CH_genus.csv",
+        "results/genus_comparison/volcano_oral_CH_genus.png",
+        "results/genus_comparison/da_fecal_CH_genus.csv",
+        "results/genus_comparison/volcano_fecal_CH_genus.png",
+        "results/genus_comparison/da_paired_OC_FC_genus.csv",
+        "results/genus_comparison/clr_da_oral_CH_genus.csv",
+        "results/genus_comparison/clr_da_fecal_CH_genus.csv",
+        "results/genus_comparison/clr_da_paired_OC_FC_genus.csv",
+        "results/genus_comparison/top10_significant_genus.csv",
+
+        # --- Alpha diversity ---
+        "results/alpha_diversity/alpha_oral.csv",
+        "results/alpha_diversity/alpha_fecal.csv",
+        "results/alpha_diversity/alpha_healthy.csv",
+        "results/alpha_diversity/alpha_healthy_fecal.csv",
+        "results/alpha_diversity/alpha_matched.csv",
+        "results/alpha_diversity/alpha_stats.txt",
+        "results/alpha_diversity/paired_alpha_stats.csv",
+        "results/alpha_diversity/paired_alpha_deltas.csv",
+        "results/alpha_diversity/paired_alpha_delta_boxplot.png",
+        "results/alpha_diversity/boxplot_shannon_allgroups.png",
+        "results/alpha_diversity/boxplot_simpson_allgroups.png",
+        "results/alpha_diversity/boxplot_richness_allgroups.png",
+        "results/alpha_diversity/boxplot_shannon_oral_vs_healthy.png",
+        "results/alpha_diversity/boxplot_simpson_oral_vs_healthy.png",
+        "results/alpha_diversity/boxplot_richness_oral_vs_healthy.png",
+        "results/alpha_diversity/paired_boxplot_shannon_oral_fecal.png",
+        "results/alpha_diversity/paired_boxplot_simpson_oral_fecal.png",
+        "results/alpha_diversity/paired_boxplot_richness_oral_fecal.png",
+        "results/alpha_diversity/boxplot_shannon_fecal_vs_healthyfecal.png",
+        "results/alpha_diversity/boxplot_simpson_fecal_vs_healthyfecal.png",
+        "results/alpha_diversity/boxplot_richness_fecal_vs_healthyfecal.png",
+
+        # --- Alpha effect-size QC ---
+        "results/alpha_diversity/alpha_effect_sizes.csv",
+        "results/alpha_diversity/alpha_outliers_iqr.csv",
+        "results/alpha_diversity/alpha_stability_summary.txt",
+
+        # --- Beta diversity ---
+        "results/beta_diversity/pcoa_bray_oral_vs_healthy.png",
+        "results/beta_diversity/pcoa_jaccard_oral_vs_healthy.png",
+        "results/beta_diversity/pcoa_bray_fecal_vs_healthyfecal.png",
+        "results/beta_diversity/pcoa_jaccard_fecal_vs_healthyfecal.png",
+        "results/beta_diversity/pcoa_bray_oral_vs_fecal.png",
+        "results/beta_diversity/pcoa_jaccard_oral_vs_fecal.png",
+        "results/beta_diversity/pcoa_bray_allgroups.png",
+        "results/beta_diversity/pcoa_jaccard_allgroups.png",
+        "results/beta_diversity/beta_group_distances.csv",
+        "results/beta_diversity/beta_stats.txt",
+        "results/beta_diversity/permanova_oral_CH_bray.txt",
+        "results/beta_diversity/permanova_oral_CH_jaccard.txt",
+        "results/beta_diversity/permanova_fecal_CH_bray.txt",
+        "results/beta_diversity/permanova_fecal_CH_jaccard.txt",
+        "results/beta_diversity/permanova_site_bray.txt",
+        "results/beta_diversity/permanova_site_jaccard.txt",
+        "results/beta_diversity/permdisp_site_bray.txt",
+        "results/beta_diversity/permdisp_site_jaccard.txt",
+        "results/beta_diversity/pairwise_oral_fecal_distances.csv",
+        "results/beta_diversity/pairwise_oral_fecal_summary.csv",
+        "results/beta_diversity/pairwise_oral_fecal_violinplot.png",
+
+        # --- Alpha models ---
+        "results/alpha_models/alpha_models_fecal.csv",
+        "results/alpha_models/alpha_models_oral.csv",
+        "results/alpha_models/boxplot_fecal_Shannon_with_covariates.png",
+        "results/alpha_models/boxplot_fecal_Richness_with_covariates.png",
+        "results/alpha_models/boxplot_fecal_Evenness_with_covariates.png",
+        "results/alpha_models/boxplot_oral_Shannon_with_covariates.png",
+        "results/alpha_models/boxplot_oral_Richness_with_covariates.png",
+        "results/alpha_models/boxplot_oral_Evenness_with_covariates.png",
+
+        # --- Beta ~ covariates ---
+        "results/beta-covariates/pcoa_oral_bray_with_ellipses.png",
+        "results/beta-covariates/pcoa_oral_aitchison_with_ellipses.png",
+        "results/beta-covariates/pcoa_fecal_bray_with_ellipses.png",
+        "results/beta-covariates/pcoa_fecal_aitchison_with_ellipses.png",
+        "results/beta-covariates/permanova_oral_bray_with_covariates.csv",
+        "results/beta-covariates/permanova_oral_aitchison_with_covariates.csv",
+        "results/beta-covariates/permanova_fecal_bray_with_covariates.csv",
+        "results/beta-covariates/permanova_fecal_aitchison_with_covariates.csv",
+        "results/beta-covariates/permdisp_oral_bray_with_covariates.csv",
+        "results/beta-covariates/permdisp_fecal_bray_with_covariates.csv",
+
+        # --- ML (three runs) ---
+        "results/ml-ibd_levels/.done",
+        "results/ml-ratios/.done",
+        "results/responder_prediction/.done",
+        "results/oral_fecal_overlap/.done",
+        "results/responder_combined/.done"
+
+# --------------------------------------------------------------------
+# OPTIONAL: Sample index (not part of rule all)
+# --------------------------------------------------------------------
+rule build_sample_index:
+    """
+    Build a light sample index joining Crohn + Healthy (optional helper).
+    Not included in `rule all` to avoid forcing extra dependencies.
+    """
+    input:
+        crohn   = "data/processed/clinical_clean.csv",
+        healthy = "data/meta/healthy_metadata.csv"
+    output:
+        "data/meta/sample_index.csv"
+    shell:
+        "python scripts/build_sample_index.py --crohn {input.crohn} --healthy {input.healthy} --out {output}"
+
+# --------------------------------------------------------------------
+# CROHN METADATA (core + extended) from row-oriented Excel
+# --------------------------------------------------------------------
+rule crohn_metadata:
+    input:
+        xlsx = "data/Metadata_metagenomics.xlsx"
+    output:
+        core     = "data/meta/crohn_metadata_core.csv",
+        extended = "data/meta/crohn_metadata_extended.csv"
+    shell:
+        r"""
+        set -euo pipefail
+        python scripts/crohn_metadata.py \
+          --input {input.xlsx} \
+          --outdir data/meta \
+          --prefix crohn_metadata
+        """
+
+# --------------------------------------------------------------------
+# HEALTHY METADATA from pilot + DAG3 + MetaPhlAn headers
+# --------------------------------------------------------------------
+rule healthy_metadata:
+    input:
+        pilot   = "data/pilot_with_all_IDs_mici.csv",
+        dag3    = "data/DAG3_metadata_merged_ready_v27.xlsx",
+        fecal   = "data/fecal_only_results_metaphlan4.txt",
+        oral    = "data/oral_only_results_metaphlan4.txt",
+        links   = "data/meta/healthy_oral_links_clean.csv"
+    output:
+        meta = "data/meta/healthy_metadata.csv"
+    shell:
+        r"""
+        set -euo pipefail
+        python scripts/healthy_metadata.py \
+          --in    {input.links} \
+          --pilot {input.pilot} \
+          --dag3  {input.dag3} \
+          --fecal {input.fecal} \
+          --oral  {input.oral} \
+          --out   {output.meta} \
+          --sheet 0
+        """
+
+# --------------------------------------------------------------------
+# MODEL TABLE (pooled Crohn + Healthy) for multivariable models
+# --------------------------------------------------------------------
+rule model_table_pooled:
+    input:
+        crohn      = "data/meta/crohn_metadata_core.csv",
+        crohn_ext  = "data/meta/crohn_metadata_extended.csv",
+        healthy    = "data/meta/healthy_metadata.csv",
+        script     = "scripts/build_model_table_pooled.py"
+    output:
+        pooled  = "data/meta/model_table_pooled.csv",
+        missing = "data/meta/missing_ids_for_email.csv"
+    shell:
+        r"""
+        python {input.script} \
+          --crohn {input.crohn} \
+          --crohn-extended {input.crohn_ext} \
+          --healthy {input.healthy} \
+          --out-pooled {output.pooled} \
+          --out-missing {output.missing}
+        """
+
+# --------------------------------------------------------------------
+# PREPROCESSING (metaphlan merges, matching, etc.)
+# --------------------------------------------------------------------
+rule preprocessing:
+    input:
+        metadata      = "data/Metadata_metagenomics.xlsx",
+        crohn         = "data/utrecht_metaphlan_merged.txt",
+        healthy_oral  = "data/oral_only_results_metaphlan4.txt",
+        healthy_fecal = "data/fecal_only_results_metaphlan4.txt"
+    output:
+        oral_crohn    = "data/processed/oral_abund_crohn.csv",
+        fecal_crohn   = "data/processed/fecal_abund_crohn.csv",
+        healthy_oral  = "data/processed/oral_abund_healthy.csv",   # key matches preprocessing.py
+        healthy_fecal = "data/processed/fecal_abund_healthy.csv",  # key matches preprocessing.py
+        matched       = "data/processed/matched_sample_ids.csv"
+    script:
+        "scripts/preprocessing.py"
+
+# --------------------------------------------------------------------
+# FILTERING (prevalence & abundance thresholds + QC plot)
+# --------------------------------------------------------------------
+rule filtering:
+    input:
+        oral          = "data/processed/oral_abund_crohn.csv",
+        fecal         = "data/processed/fecal_abund_crohn.csv",
+        healthy_oral  = "data/processed/oral_abund_healthy.csv",
+        healthy_fecal = "data/processed/fecal_abund_healthy.csv"
+    output:
+        oral_norm          = "data/filtered/oral_abund_crohn_filtered_normalized.csv",
+        fecal_norm         = "data/filtered/fecal_abund_crohn_filtered_normalized.csv",
+        healthy_oral_norm  = "data/filtered/oral_abund_healthy_filtered_normalized.csv",
+        healthy_fecal_norm = "data/filtered/fecal_abund_healthy_filtered_normalized.csv",
+        report             = "results/filtering/filtering_report.txt",
+        barplot            = "results/filtering/filtering_barplot_allgroups.png"
+    params:
+        prevalence = 0.20,
+        abundance  = 10.0     # 10% on percent-scaled inputs (0..100)
+    script:
+        "scripts/filtering.py"
+
+# --------------------------------------------------------------------
+# SPECIES-LEVEL COMPARISONS & PLOTS
+# --------------------------------------------------------------------
+rule species_comparison:
+    input:
+        oral_crohn    = "data/filtered/oral_abund_crohn_filtered_normalized.csv",
+        oral_healthy  = "data/filtered/oral_abund_healthy_filtered_normalized.csv",
+        fecal_crohn   = "data/filtered/fecal_abund_crohn_filtered_normalized.csv",
+        healthy_fecal = "data/filtered/fecal_abund_healthy_filtered_normalized.csv"
+    params:
+        outdir = "results/species_comparison"
+    output:
+        "results/species_comparison/stackedbar_top15_oral_crohn_species.png",
+        "results/species_comparison/top15_oral_crohn_species.csv",
+        "results/species_comparison/stackedbar_top15_oral_healthy_species.png",
+        "results/species_comparison/top15_oral_healthy_species.csv",
+        "results/species_comparison/stackedbar_top15_fecal_crohn_species.png",
+        "results/species_comparison/top15_fecal_crohn_species.csv",
+        "results/species_comparison/stackedbar_top15_fecal_healthy_species.png",
+        "results/species_comparison/top15_fecal_healthy_species.csv",
+        "results/species_comparison/heatmap_pairs_crohn_species.png",
+        "results/species_comparison/heatmap_pairs_healthy_species.png",
+        "results/species_comparison/heatmap_group_means_species.png",
+        "results/species_comparison/heatmap_group_deltas_species.png",
+        "results/species_comparison/group_means_species.csv",
+        "results/species_comparison/group_deltas_species.csv",
+        "results/species_comparison/means_and_mean_species.csv",
+        "results/species_comparison/barplot_oral_species_top15.png",
+        "results/species_comparison/barplot_fecal_species_top15.png",
+        "results/species_comparison/da_oral_CH_species.csv",
+        "results/species_comparison/volcano_oral_CH_species.png",
+        "results/species_comparison/da_fecal_CH_species.csv",
+        "results/species_comparison/volcano_fecal_CH_species.png",
+        "results/species_comparison/da_paired_OC_FC_species.csv",
+        "results/species_comparison/clr_da_oral_CH_species.csv",
+        "results/species_comparison/clr_da_fecal_CH_species.csv",
+        "results/species_comparison/clr_da_paired_OC_FC_species.csv",
+        "results/species_comparison/top10_significant_species.csv"
+    shell:
+        (
+            "python scripts/species_comparison.py "
+            "{input.oral_crohn} {input.oral_healthy} {input.fecal_crohn} "
+            "{input.healthy_fecal} {params.outdir}"
+        )
+
+# --------------------------------------------------------------------
+# GENUS-LEVEL COMPARISONS & PLOTS
+# --------------------------------------------------------------------
+rule genus_comparison:
+    input:
+        oral_crohn    = "data/filtered/oral_abund_crohn_filtered_normalized.csv",
+        oral_healthy  = "data/filtered/oral_abund_healthy_filtered_normalized.csv",
+        fecal_crohn   = "data/filtered/fecal_abund_crohn_filtered_normalized.csv",
+        healthy_fecal = "data/filtered/fecal_abund_healthy_filtered_normalized.csv"
+    params:
+        outdir = "results/genus_comparison"
+    output:
+        "results/genus_comparison/stackedbar_top10_oral_crohn.png",
+        "results/genus_comparison/top10_oral_crohn.csv",
+        "results/genus_comparison/stackedbar_top10_oral_healthy.png",
+        "results/genus_comparison/top10_oral_healthy.csv",
+        "results/genus_comparison/stackedbar_top10_fecal_crohn.png",
+        "results/genus_comparison/top10_fecal_crohn.csv",
+        "results/genus_comparison/stackedbar_top10_fecal_healthy.png",
+        "results/genus_comparison/top10_fecal_healthy.csv",
+        "results/genus_comparison/heatmap_pairs_crohn_genus.png",
+        "results/genus_comparison/heatmap_pairs_healthy_genus.png",
+        "results/genus_comparison/heatmap_group_means_genus.png",
+        "results/genus_comparison/heatmap_group_deltas_genus.png",
+        "results/genus_comparison/group_means_genus.csv",
+        "results/genus_comparison/group_deltas_genus.csv",
+        "results/genus_comparison/means_and_mean_genus.csv",
+        "results/genus_comparison/barplot_oral_genus_top10.png",
+        "results/genus_comparison/barplot_fecal_genus_top10.png",
+        "results/genus_comparison/da_oral_CH_genus.csv",
+        "results/genus_comparison/volcano_oral_CH_genus.png",
+        "results/genus_comparison/da_fecal_CH_genus.csv",
+        "results/genus_comparison/volcano_fecal_CH_genus.png",
+        "results/genus_comparison/da_paired_OC_FC_genus.csv",
+        "results/genus_comparison/clr_da_oral_CH_genus.csv",
+        "results/genus_comparison/clr_da_fecal_CH_genus.csv",
+        "results/genus_comparison/clr_da_paired_OC_FC_genus.csv",
+        "results/genus_comparison/top10_significant_genus.csv"
+    shell:
+        (
+            "python scripts/genus_comparison.py "
+            "{input.oral_crohn} {input.oral_healthy} {input.fecal_crohn} "
+            "{input.healthy_fecal} {params.outdir}"
+        )
+
+# --------------------------------------------------------------------
+# ALPHA DIVERSITY (metrics, stats, and plots)
+# --------------------------------------------------------------------
+rule alpha_diversity:
+    input:
+        oral_crohn    = "data/filtered/oral_abund_crohn_filtered_normalized.csv",
+        fecal_crohn   = "data/filtered/fecal_abund_crohn_filtered_normalized.csv",
+        oral_healthy  = "data/filtered/oral_abund_healthy_filtered_normalized.csv",
+        healthy_fecal = "data/filtered/fecal_abund_healthy_filtered_normalized.csv",
+        matched_ids   = "data/processed/matched_sample_ids.csv"
+    output:
+        oral              = "results/alpha_diversity/alpha_oral.csv",
+        fecal             = "results/alpha_diversity/alpha_fecal.csv",
+        healthy           = "results/alpha_diversity/alpha_healthy.csv",
+        healthy_fecal     = "results/alpha_diversity/alpha_healthy_fecal.csv",
+        matched_csv       = "results/alpha_diversity/alpha_matched.csv",
+        stats_txt         = "results/alpha_diversity/alpha_stats.txt",
+        paired_stats      = "results/alpha_diversity/paired_alpha_stats.csv",
+        paired_deltas     = "results/alpha_diversity/paired_alpha_deltas.csv",
+        paired_delta_box  = "results/alpha_diversity/paired_alpha_delta_boxplot.png",
+        plot_shannon_all  = "results/alpha_diversity/boxplot_shannon_allgroups.png",
+        plot_simpson_all  = "results/alpha_diversity/boxplot_simpson_allgroups.png",
+        plot_richness_all = "results/alpha_diversity/boxplot_richness_allgroups.png",
+        plot_shannon_oh   = "results/alpha_diversity/boxplot_shannon_oral_vs_healthy.png",
+        plot_simpson_oh   = "results/alpha_diversity/boxplot_simpson_oral_vs_healthy.png",
+        plot_richness_oh  = "results/alpha_diversity/boxplot_richness_oral_vs_healthy.png",
+        plot_shannon_of   = "results/alpha_diversity/paired_boxplot_shannon_oral_fecal.png",
+        plot_simpson_of   = "results/alpha_diversity/paired_boxplot_simpson_oral_fecal.png",
+        plot_richness_of  = "results/alpha_diversity/paired_boxplot_richness_oral_fecal.png",
+        plot_shannon_fh   = "results/alpha_diversity/boxplot_shannon_fecal_vs_healthyfecal.png",
+        plot_simpson_fh   = "results/alpha_diversity/boxplot_simpson_fecal_vs_healthyfecal.png",
+        plot_richness_fh  = "results/alpha_diversity/boxplot_richness_fecal_vs_healthyfecal.png"
+    script:
+        "scripts/alpha_diversity.py"
+
+# --------------------------------------------------------------------
+# ALPHA EFFECT SIZES, OUTLIERS, STABILITY (QC)
+# --------------------------------------------------------------------
+rule alpha_effects_qc:
+    input:
+        alpha_oral          = "results/alpha_diversity/alpha_oral.csv",
+        alpha_fecal         = "results/alpha_diversity/alpha_fecal.csv",
+        alpha_healthy       = "results/alpha_diversity/alpha_healthy.csv",
+        alpha_healthy_fecal = "results/alpha_diversity/alpha_healthy_fecal.csv",
+        matched             = "results/alpha_diversity/alpha_matched.csv",
+        paired_stats        = "results/alpha_diversity/paired_alpha_stats.csv"
+    output:
+        effects   = "results/alpha_diversity/alpha_effect_sizes.csv",
+        outliers  = "results/alpha_diversity/alpha_outliers_iqr.csv",
+        stability = "results/alpha_diversity/alpha_stability_summary.txt"
+    shell:
+        r"""
+        set -euo pipefail
+        python scripts/alpha_effects_qc.py \
+          --alpha-oral {input.alpha_oral} \
+          --alpha-fecal {input.alpha_fecal} \
+          --alpha-healthy {input.alpha_healthy} \
+          --alpha-healthy-fecal {input.alpha_healthy_fecal} \
+          --matched {input.matched} \
+          --paired-stats {input.paired_stats} \
+          --outdir results/alpha_diversity
+        """
+
+# --------------------------------------------------------------------
+# BETA DIVERSITY (PCoA, PERMANOVA, PERMDISP, pairwise distances)
+# --------------------------------------------------------------------
+rule beta_diversity:
+    input:
+        oral_crohn    = "data/filtered/oral_abund_crohn_filtered_normalized.csv",
+        fecal_crohn   = "data/filtered/fecal_abund_crohn_filtered_normalized.csv",
+        oral_healthy  = "data/filtered/oral_abund_healthy_filtered_normalized.csv",
+        healthy_fecal = "data/filtered/fecal_abund_healthy_filtered_normalized.csv",
+        matched_ids   = "data/processed/matched_sample_ids.csv"
+    output:
+        "results/beta_diversity/pcoa_bray_oral_vs_healthy.png",
+        "results/beta_diversity/pcoa_jaccard_oral_vs_healthy.png",
+        "results/beta_diversity/pcoa_bray_fecal_vs_healthyfecal.png",
+        "results/beta_diversity/pcoa_jaccard_fecal_vs_healthyfecal.png",
+        "results/beta_diversity/pcoa_bray_oral_vs_fecal.png",
+        "results/beta_diversity/pcoa_jaccard_oral_vs_fecal.png",
+        "results/beta_diversity/pcoa_bray_allgroups.png",
+        "results/beta_diversity/pcoa_jaccard_allgroups.png",
+        "results/beta_diversity/beta_group_distances.csv",
+        "results/beta_diversity/beta_stats.txt",
+        "results/beta_diversity/permanova_oral_CH_bray.txt",
+        "results/beta_diversity/permanova_oral_CH_jaccard.txt",
+        "results/beta_diversity/permanova_fecal_CH_bray.txt",
+        "results/beta_diversity/permanova_fecal_CH_jaccard.txt",
+        "results/beta_diversity/permanova_site_bray.txt",
+        "results/beta_diversity/permanova_site_jaccard.txt",
+        "results/beta_diversity/permdisp_site_bray.txt",
+        "results/beta_diversity/permdisp_site_jaccard.txt",
+        "results/beta_diversity/pairwise_oral_fecal_distances.csv",
+        "results/beta_diversity/pairwise_oral_fecal_summary.csv",
+        "results/beta_diversity/pairwise_oral_fecal_violinplot.png"
+    shell:
+        (
+            "Rscript scripts/beta_diversity.R "
+            "{input.oral_crohn} {input.fecal_crohn} "
+            "{input.oral_healthy} {input.healthy_fecal} "
+            "{input.matched_ids} results/beta_diversity"
+        )
+
+# --------------------------------------------------------------------
+# Alpha models
+# --------------------------------------------------------------------
+rule alpha_models:
+    input:
+        alpha_oral    = "results/alpha_diversity/alpha_oral.csv",
+        alpha_fecal   = "results/alpha_diversity/alpha_fecal.csv",
+        alpha_healthy = "results/alpha_diversity/alpha_healthy.csv",
+        alpha_hfecal  = "results/alpha_diversity/alpha_healthy_fecal.csv",
+        pooled        = "data/meta/model_table_pooled.csv",
+        script        = "scripts/alpha_models.R"
+    output:
+        fecal_csv = "results/alpha_models/alpha_models_fecal.csv",
+        oral_csv  = "results/alpha_models/alpha_models_oral.csv",
+        p1 = "results/alpha_models/boxplot_fecal_Shannon_with_covariates.png",
+        p2 = "results/alpha_models/boxplot_fecal_Richness_with_covariates.png",
+        p3 = "results/alpha_models/boxplot_fecal_Evenness_with_covariates.png",
+        p4 = "results/alpha_models/boxplot_oral_Shannon_with_covariates.png",
+        p5 = "results/alpha_models/boxplot_oral_Richness_with_covariates.png",
+        p6 = "results/alpha_models/boxplot_oral_Evenness_with_covariates.png"
+    shell:
+        r"""
+        set -euo pipefail
+        Rscript {input.script} \
+          --alpha-oral {input.alpha_oral} \
+          --alpha-fecal {input.alpha_fecal} \
+          --alpha-healthy {input.alpha_healthy} \
+          --alpha-healthy-fecal {input.alpha_hfecal} \
+          --covariates {input.pooled} \
+          --outdir results/alpha_models
+        """
+
+# --------------------------------------------------------------------
+# BETA Covariates
+# --------------------------------------------------------------------
+rule beta_covariates:
+    input:
+        oral_crohn    = "data/filtered/oral_abund_crohn_filtered_normalized.csv",
+        fecal_crohn   = "data/filtered/fecal_abund_crohn_filtered_normalized.csv",
+        oral_healthy  = "data/filtered/oral_abund_healthy_filtered_normalized.csv",
+        fecal_healthy = "data/filtered/fecal_abund_healthy_filtered_normalized.csv",
+        covars        = "data/meta/model_table_pooled.csv",
+        script        = "scripts/beta_covariates.R"
+    output:
+        "results/beta-covariates/pcoa_oral_bray_with_ellipses.png",
+        "results/beta-covariates/pcoa_oral_aitchison_with_ellipses.png",
+        "results/beta-covariates/pcoa_fecal_bray_with_ellipses.png",
+        "results/beta-covariates/pcoa_fecal_aitchison_with_ellipses.png",
+        "results/beta-covariates/permanova_oral_bray_with_covariates.csv",
+        "results/beta-covariates/permanova_oral_aitchison_with_covariates.csv",
+        "results/beta-covariates/permanova_fecal_bray_with_covariates.csv",
+        "results/beta-covariates/permanova_fecal_aitchison_with_covariates.csv",
+        "results/beta-covariates/permdisp_oral_bray_with_covariates.csv",
+        "results/beta-covariates/permdisp_fecal_bray_with_covariates.csv"
+    shell:
+        r"""
+        Rscript {input.script} \
+          --oral-crohn {input.oral_crohn} \
+          --fecal-crohn {input.fecal_crohn} \
+          --oral-healthy {input.oral_healthy} \
+          --fecal-healthy {input.fecal_healthy} \
+          --covariates {input.covars} \
+          --outdir results/beta-covariates
+        """
+
+# ------------------------------
+rule ml_levels:
+    input:
+        oral   = "data/filtered/oral_abund_crohn_filtered_normalized.csv",
+        fecal  = "data/filtered/fecal_abund_crohn_filtered_normalized.csv",
+        covars = "data/meta/model_table_pooled.csv",
+        script = "scripts/ibd_within_ml.py"
+    output:
+        touch("results/ml-ibd_levels/.done")
+    shell:
+        r"""
+        python {input.script} \
+          --oral-crohn {input.oral} \
+          --fecal-crohn {input.fecal} \
+          --covariates {input.covars} \
+          --outdir results/ml-ibd_levels \
+          --target PPI_use \
+          --min-prev-samples 10 \
+          --models elasticnet,rf \
+          --use-clr \
+          --add-covariates "Age,Sex,BMI" \
+          --propensity-covars "Age,Sex,BMI,Antibiotics_3m" \
+          --outer-splits 5 --outer-repeats 10 --inner-splits 3 \
+          --calibration sigmoid \
+          --seed 13
+        """
+
+# ------------------------------------------------------------
+# IBD within ML
+# ------------------------------------------------------------
+rule ibd_within_ml0:
+    input:
+        oral_crohn="data/filtered/oral_abund_crohn_filtered_normalized.csv",
+        fecal_crohn="data/filtered/fecal_abund_crohn_filtered_normalized.csv",
+        covars="data/meta/model_table_pooled.csv",
+        script="scripts/ibd_within_ml.py",
+    output:
+        touch("results/ml-ibd2/.done"),
+    shell:
+        r"""
+        python {input.script} \
+          --oral-crohn {input.oral_crohn} \
+          --fecal-crohn {input.fecal_crohn} \
+          --covariates {input.covars} \
+          --outdir results/ml-ibd2 \
+          --target PPI_use \
+          --min-prev 0.20 --min-prev-samples 22 \
+          --max-features 500 --seed 13 \
+          --outer-splits 5 --outer-repeats 20 --inner-splits 3 \
+          --calibration sigmoid \
+          --models elasticnet,rf \
+          --add-covariates "Age,Sex,BMI" \
+          --propensity-covars "Age,Sex,BMI,Antibiotics_3m" \
+          --group-col Patient_ID \
+          --sens-prev-samples "10,15,22" \
+          --use-clr
+        """
+
+rule ml_ratios:
+    input:
+        oral   = "data/filtered/oral_abund_crohn_filtered_normalized.csv",
+        fecal  = "data/filtered/fecal_abund_crohn_filtered_normalized.csv",
+        covars = "data/meta/model_table_pooled.csv",
+        script = "scripts/ratio_methods.py"
+    output:
+        touch("results/ml-ratios/.done")
+    shell:
+        r"""
+        python {input.script} \
+          --oral-crohn {input.oral} \
+          --fecal-crohn {input.fecal} \
+          --covariates {input.covars} \
+          --outdir results/ml-ratios \
+          --target PPI_use \
+          --min-prev-samples 10 \
+          --top-m 30 \
+          --seed 13
+        """
+
+# ---------- Responder prediction: oral / fecal / combined (genus + species) ----------
+CROHN_META  = "data/meta/crohn_metadata_extended.csv"
+ORAL_PROC   = "data/filtered/oral_abund_crohn_filtered_normalized.csv"
+FECAL_PROC  = "data/filtered/fecal_abund_crohn_filtered_normalized.csv"
+
+rule responder_prediction:
+    input:
+        meta  = CROHN_META,
+        oral  = ORAL_PROC,
+        fecal = FECAL_PROC,
+    output:
+        touch("results/responder_prediction/.done")
+    params:
+        outdir       = "results/responder_prediction",
+        min_prev     = 0.00,
+        use_clr      = 1,
+        pseudo       = 1e-6,
+        cohort       = "intersection",
+        seed         = 42,
+        splits       = 5,
+        rf_trees     = 1000,
+        enet_c       = 1.0,
+        l1_ratio     = 0.5
+    shell:
+        r"""
+        set -euo pipefail
+        python scripts/responder_prediction.py \
+          --metadata {input.meta} \
+          --oral {input.oral} \
+          --fecal {input.fecal} \
+          --outdir {params.outdir} \
+          --min-prevalence {params.min_prev} \
+          --use-clr {params.use_clr} \
+          --pseudocount {params.pseudo} \
+          --cohort {params.cohort} \
+          --seed {params.seed} \
+          --splits {params.splits} \
+          --rf-trees {params.rf_trees} \
+          --enet-C {params.enet_c} \
+          --l1-ratio {params.l1_ratio}
+
+        touch {output}
+        """
+
+# ---------------- Oral–Fecal Overlap ----------------
+rule oral_fecal_overlap:
+    input:
+        meta  = "data/meta/crohn_metadata_extended.csv",
+        oral  = "data/filtered/oral_abund_crohn_filtered_normalized.csv",
+        fecal = "data/filtered/fecal_abund_crohn_filtered_normalized.csv",
+    output:
+        touch("results/oral_fecal_overlap/.done")
+    params:
+        outdir = "results/oral_fecal_overlap",
+        pres   = 0.0
+    shell:
+        r"""
+        python scripts/oral_fecal_overlap.py \
+          --metadata {input.meta} \
+          --oral {input.oral} \
+          --fecal {input.fecal} \
+          --outdir {params.outdir} \
+          --presence-threshold {params.pres}
+        touch {output}
+        """
