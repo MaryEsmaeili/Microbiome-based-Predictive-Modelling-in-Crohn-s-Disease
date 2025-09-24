@@ -525,14 +525,8 @@ rule ml_summary:
         csv   = SUMMARY_CSV,
         jsonl = SUMMARY_JSONL
     params:
-        runs_glob = "{"
-                "results/ml/genus/cv_scores.json,"
-                "results/ml/genus_l1/cv_scores.json,"
-                "results/ml/genus_rf/cv_scores.json,"
-                "results/ml/species/cv_scores.json,"
-                "results/ml/species_l1/cv_scores.json,"
-                "results/ml/species_rf/cv_scores.json"
-                "}",
+        # همه‌ی مدل‌ها (genus/species, logreg/l1/rf/… هرچی) را بپوشان
+        runs_glob = "results/ml/*/cv_scores.json",
         outdir    = "results/ml/summary"
     shell:
         r"""
