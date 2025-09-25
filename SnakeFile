@@ -525,14 +525,18 @@ rule ml_summary:
         csv   = SUMMARY_CSV,
         jsonl = SUMMARY_JSONL
     params:
-        # همه‌ی مدل‌ها (genus/species, logreg/l1/rf/… هرچی) را بپوشان
-        runs_glob = "results/ml/*/cv_scores.json",
-        outdir    = "results/ml/summary"
+        runs_glob  = "results/ml/*/cv_scores.json",
+        outdir_sum = "results/ml/summary",
+        topn       = 30,
+        plot_flag  = "--make-plots"   # اگر پلات نمی‌خواهی: ""
     shell:
         r"""
-        mkdir -p {params.outdir}
+        mkdir -p {params.outdir_sum}
         python {input.script} \
           --runs-glob "{params.runs_glob}" \
           --out-csv {output.csv} \
-          --out-jsonl {output.jsonl}
+          --out-jsonl {output.jsonl} \
+          --outdir-summary {params.outdir_sum} \
+          --topn-biomarkers {params.topn} \
+          {params.plot_flag}
         """
