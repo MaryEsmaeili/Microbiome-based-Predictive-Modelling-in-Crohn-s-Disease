@@ -1,16 +1,16 @@
 #############################################
 # Snakefile — preprocessing → filtering → alpha/beta → taxa_compare → QC → attach_meta → ML-CV → summary
-# بدون config.yaml
+# Single-file pipeline (no config.yaml). Clear English comments throughout.
 #############################################
 
 import os
 
-# ========= Constants =========
+# ========= Global constants =========
 ML_SEED     = 42
 ML_N_FOLDS  = 5
 SCRIPTS_DIR = "scripts"
 
-# ========= Paths: raw inputs =========
+# ========= Raw inputs =========
 META_XLSX         = "data/Metadata_metagenomics.xlsx"
 CROHN_MERGED_TSV  = "data/utrecht_metaphlan_merged.txt"
 HEALTHY_ORAL_TSV  = "data/oral_only_results_metaphlan4.txt"
@@ -23,7 +23,7 @@ ORAL_HEALTHY_OUT   = "data/processed/oral_abund_healthy.csv"
 FECAL_HEALTHY_OUT  = "data/processed/fecal_abund_healthy.csv"
 MATCHED_IDS_OUT    = "data/processed/matched_sample_ids.csv"
 
-# ========= Filtering outputs =========
+# ========= Filtering outputs (diagnostics too) =========
 ORAL_NORM_OUT          = "data/filtered/oral_abund_crohn_filtered_normalized.csv"
 FECAL_NORM_OUT         = "data/filtered/fecal_abund_crohn_filtered_normalized.csv"
 ORAL_HEALTHY_NORM_OUT  = "data/filtered/oral_abund_healthy_filtered_normalized.csv"
@@ -41,7 +41,7 @@ PREV_FECAL_PNG         = "results/filtering/prevalence_mean_scatter_fecal_combin
 
 # ========= Covariates & colors =========
 MODEL_TABLE_POOLED     = "data/meta/model_table_pooled.csv"
-CONFIG_COLORS_YAML     = "config/colors.yml"   # اختیاری
+CONFIG_COLORS_YAML     = "config/colors.yml"   # optional
 
 # ========= Alpha outputs =========
 ALPHA_OUTDIR = "results/alpha_models"
@@ -105,74 +105,78 @@ TAXA_OUTPUTS = [
     for rank in RANKS for fn in _TAXA_FILES
 ]
 
-# ========= ML / QC paths =========
-QC_GENUS_DIR   = "results/ml/genus_qc"
-QC_SPECIES_DIR = "results/ml/species_qc"
+# ========= QC / META / ML paths =========
+GENUS_WIDE_CLR   = f"{TAXA_OUTDIR}/genus/ml_genus_wide_clr.csv"
+SPECIES_WIDE_CLR = f"{TAXA_OUTDIR}/species/ml_species_wide_clr.csv"
 
-QC_CSV_GENUS   = f"{QC_GENUS_DIR}/ml_genus_wide_clr.qc.csv"
-QC_CSV_SPECIES = f"{QC_SPECIES_DIR}/ml_species_wide_clr.qc.csv"
+QC_DIR              = "results/qc"
+QC_EXCLUSION        = f"{QC_DIR}/exclusion_list.txt"
+GENUS_QC_WIDE_CLR   = f"{QC_DIR}/ml_genus_wide_clr.qc.csv"
+SPECIES_QC_WIDE_CLR = f"{QC_DIR}/ml_species_wide_clr.qc.csv"
+QC_REPORT           = f"{QC_DIR}/qc_report.txt"
 
-QC_REPORT_GENUS   = f"{QC_GENUS_DIR}/qc_report_genus.csv"
-QC_META_GENUS     = f"{QC_GENUS_DIR}/qc_meta_genus.json"
-QC_EXCL_GENUS     = f"{QC_GENUS_DIR}/excluded_samples_genus.txt"
-QC_PLOT_GENUS     = f"{QC_GENUS_DIR}/qc_scatter_genus.png"
-
-QC_REPORT_SPECIES = f"{QC_SPECIES_DIR}/qc_report_species.csv"
-QC_META_SPECIES   = f"{QC_SPECIES_DIR}/qc_meta_species.json"
-QC_EXCL_SPECIES   = f"{QC_SPECIES_DIR}/excluded_samples_species.txt"
-QC_PLOT_SPECIES   = f"{QC_SPECIES_DIR}/qc_scatter_species.png"
+META_DIR           = "results/meta"
+GENUS_WITHMETA     = f"{META_DIR}/ml_genus_wide_clr.qc.withmeta.csv"
+SPECIES_WITHMETA   = f"{META_DIR}/ml_species_wide_clr.qc.withmeta.csv"
 
 ML_GENUS_DIR       = "results/ml/genus"
-ML_GENUS_L1_DIR    = "results/ml/genus_l1"
-ML_GENUS_RF_DIR    = "results/ml/genus_rf"
-ML_GENUS_LSO_DIR   = "results/ml/genus_lso"
+ML_GENUS_L1_DIR    = "results/ml/genus/l1"
+ML_GENUS_RF_DIR    = "results/ml/genus/rf"
+ML_GENUS_LSO_DIR   = "results/ml/genus/lso"
 
 ML_SPECIES_DIR     = "results/ml/species"
-ML_SPECIES_L1_DIR  = "results/ml/species_l1"
-ML_SPECIES_RF_DIR  = "results/ml/species_rf"
-ML_SPECIES_LSO_DIR = "results/ml/species_lso"
+ML_SPECIES_L1_DIR  = "results/ml/species/l1"
+ML_SPECIES_RF_DIR  = "results/ml/species/rf"
+ML_SPECIES_LSO_DIR = "results/ml/species/lso"
 
-def RUN_FILES(outdir):
+def ml_outputs(base):
     return [
-        f"{outdir}/cv_scores.json",
-        f"{outdir}/cv_predictions.csv",
-        f"{outdir}/features_used.txt",
-        f"{outdir}/run_meta.json",
+        f"{base}/cv_scores.json",
+        f"{base}/cv_predictions.csv",
+        f"{base}/features_used.txt",
+        f"{base}/run_meta.json",
     ]
 
-# Summary
-SUMMARY_CSV   = "results/ml/summary/ml_summary.csv"
-SUMMARY_JSONL = "results/ml/summary/ml_models.jsonl"
+# ========= Summary =========
+MLSUM_DIR       = "results/ml_summary"
+MLSUM_OVERVIEW  = f"{MLSUM_DIR}/summary_overview.csv"
+MLSUM_TOPFEATS  = f"{MLSUM_DIR}/top_features.csv"
+MLSUM_CONFUSION = f"{MLSUM_DIR}/confusion_matrices.csv"
+MLSUM_META_JSON = f"{MLSUM_DIR}/run_meta_collated.json"
 
 # ========= Default target =========
 rule all:
     input:
-        # filtering block
+        # filtering
         ORAL_NORM_OUT, FECAL_NORM_OUT, ORAL_HEALTHY_NORM_OUT, FECAL_HEALTHY_NORM_OUT,
         FILTER_REPORT, FILTER_BARPNG, Z_BY_SAMPLE_PNG, Z_BY_TAXON_PNG, LIBSIZE_PNG,
         RANK_ORAL_PNG, RANK_FECAL_PNG, PREV_ORAL_PNG, PREV_FECAL_PNG,
         # diversity
         ALPHA_OUTPUTS, BETA_OUTPUTS,
-        # taxa compare
+        # taxa
         TAXA_OUTPUTS,
-        # QC finals + artifacts
-        QC_CSV_GENUS, QC_CSV_SPECIES,
-        QC_REPORT_GENUS, QC_META_GENUS, QC_EXCL_GENUS, QC_PLOT_GENUS,
-        QC_REPORT_SPECIES, QC_META_SPECIES, QC_EXCL_SPECIES, QC_PLOT_SPECIES,
-        # ML outputs
-        *RUN_FILES(ML_GENUS_DIR),
-        *RUN_FILES(ML_GENUS_L1_DIR),
-        *RUN_FILES(ML_GENUS_RF_DIR),
-        *RUN_FILES(ML_SPECIES_DIR),
-        *RUN_FILES(ML_SPECIES_L1_DIR),
-        *RUN_FILES(ML_SPECIES_RF_DIR),
-        # Summary
-        SUMMARY_CSV, SUMMARY_JSONL
+        # QC finals
+        GENUS_QC_WIDE_CLR, SPECIES_QC_WIDE_CLR, QC_EXCLUSION, QC_REPORT,
+        # meta
+        GENUS_WITHMETA, SPECIES_WITHMETA,
+        # ML outputs (genus)
+        *ml_outputs(ML_GENUS_DIR),
+        *ml_outputs(ML_GENUS_L1_DIR),
+        *ml_outputs(ML_GENUS_RF_DIR),
+        *ml_outputs(ML_GENUS_LSO_DIR),
+        # ML outputs (species)
+        *ml_outputs(ML_SPECIES_DIR),
+        *ml_outputs(ML_SPECIES_L1_DIR),
+        *ml_outputs(ML_SPECIES_RF_DIR),
+        *ml_outputs(ML_SPECIES_LSO_DIR),
+        # summary
+        MLSUM_OVERVIEW, MLSUM_TOPFEATS, MLSUM_CONFUSION, MLSUM_META_JSON
 
-# ========= Rules =========
-
-## -------- preprocessing --------
+# =========================================
+# 1) PREPROCESSING
+# =========================================
 rule preprocessing:
+    """Normalize sample IDs and export split abundance tables and mappings."""
     input:
         metadata      = META_XLSX,
         crohn         = CROHN_MERGED_TSV,
@@ -194,8 +198,11 @@ rule preprocessing:
     script:
         f"{SCRIPTS_DIR}/preprocessing.py"
 
-## -------- filtering --------
+# =========================================
+# 2) FILTERING
+# =========================================
 rule filtering:
+    """Prevalence/abundance filtering + normalization; emit diagnostics."""
     input:
         oral          = ORAL_CROHN_OUT,
         fecal         = FECAL_CROHN_OUT,
@@ -229,7 +236,9 @@ rule filtering:
     script:
         f"{SCRIPTS_DIR}/filtering.py"
 
-## -------- alpha diversity --------
+# =========================================
+# 3) ALPHA
+# =========================================
 rule alpha:
     input:
         oral_crohn     = ORAL_NORM_OUT,
@@ -257,7 +266,9 @@ rule alpha:
           --outdir {params.outdir}
         """
 
-## -------- beta diversity --------
+# =========================================
+# 4) BETA
+# =========================================
 rule beta:
     input:
         oral_crohn     = ORAL_NORM_OUT,
@@ -289,8 +300,11 @@ rule beta:
           --permutations  {params.permutations}
         """
 
-## -------- taxa compare (genus/species + ML matrices + plots) --------
+# =========================================
+# 5) TAXA COMPARE
+# =========================================
 rule taxa_compare:
+    """Generates DA tables/plots and ML-ready matrices (incl. clr)."""
     input:
         oral_crohn     = ORAL_NORM_OUT,
         fecal_crohn    = FECAL_NORM_OUT,
@@ -315,228 +329,322 @@ rule taxa_compare:
           --topk          {params.topk}
         """
 
-##############################################
-# QC → attach_meta → ML (logreg/l1/rf + LSO) → summary
-##############################################
+# =========================================
+# 6) QC (outlier removal for ML)
+# =========================================
+rule qc_both:
+    """
+    Outlier detection on genus/species ML matrices using qc_outliers.py.
+    REQUIRED ARGS (per current script): 
+      --in-genus --in-species [--meta]
+      --out-genus --out-species
+      --out-exclusion
+      --out-report
+      [--out-norms] [--iqr-mult]
+    """
+    input:
+        genus   = GENUS_WIDE_CLR,
+        species = SPECIES_WIDE_CLR,
+        meta    = MODEL_TABLE_POOLED,
+        script  = f"{SCRIPTS_DIR}/qc_outliers.py"
+    output:
+        excl       = QC_EXCLUSION,
+        genus_qc   = GENUS_QC_WIDE_CLR,
+        species_qc = SPECIES_QC_WIDE_CLR,
+        report     = QC_REPORT
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p {QC_DIR}
+        python {input.script} \
+          --in-genus {input.genus} \
+          --in-species {input.species} \
+          --out-genus {output.genus_qc} \
+          --out-species {output.species_qc} \
+          --out-exclusion {output.excl} \
+          --out-report {output.report} \
+          --meta {input.meta} \
+          --iqr-mult 1.5
+        """
 
-# ---------- QC (genus) ----------
+# convenience checkpoints (unchanged)
 rule qc_genus:
-    input:
-        matrix_clr = f"{TAXA_OUTDIR}/genus/ml_genus_wide_clr.csv",
-        matrix_all = f"{TAXA_OUTDIR}/genus/ml_genus_wide_all.csv",
-        script     = f"{SCRIPTS_DIR}/qc_outliers.py"
-    output:
-        qc_csv   = QC_CSV_GENUS,
-        report   = QC_REPORT_GENUS,
-        meta     = QC_META_GENUS,
-        excluded = QC_EXCL_GENUS,
-        plot     = QC_PLOT_GENUS
-    params:
-        rank   = "genus",
-        outdir = QC_GENUS_DIR
-    shell:
-        r"""
-        set -euo pipefail
-        export MPLBACKEND=Agg
-        mkdir -p {params.outdir}
-        python {input.script} \
-          --rank {params.rank} \
-          --wide-clr {input.matrix_clr} \
-          --wide-all {input.matrix_all} \
-          --outdir {params.outdir}
-        """
+    input: GENUS_QC_WIDE_CLR, QC_EXCLUSION, QC_REPORT
+    output: f"{QC_DIR}/.genus_qc_done"
+    shell: "touch {output}"
 
-# ---------- QC (species) ----------
 rule qc_species:
-    input:
-        matrix_clr = f"{TAXA_OUTDIR}/species/ml_species_wide_clr.csv",
-        matrix_all = f"{TAXA_OUTDIR}/species/ml_species_wide_all.csv",
-        script     = f"{SCRIPTS_DIR}/qc_outliers.py"
-    output:
-        qc_csv   = QC_CSV_SPECIES,
-        report   = QC_REPORT_SPECIES,
-        meta     = QC_META_SPECIES,
-        excluded = QC_EXCL_SPECIES,
-        plot     = QC_PLOT_SPECIES
-    params:
-        rank   = "species",
-        outdir = QC_SPECIES_DIR
-    shell:
-        r"""
-        set -euo pipefail
-        export MPLBACKEND=Agg
-        mkdir -p {params.outdir}
-        python {input.script} \
-          --rank {params.rank} \
-          --wide-clr {input.matrix_clr} \
-          --wide-all {input.matrix_all} \
-          --outdir {params.outdir} \
-          --max-zero-frac 0.985 \
-          --max-norm-z 6.0
-        """
-# ---------- Attach Meta (genus)
+    input: SPECIES_QC_WIDE_CLR, QC_EXCLUSION, QC_REPORT
+    output: f"{QC_DIR}/.species_qc_done"
+    shell: "touch {output}"
+    
+# =========================================
+# 7) ATTACH META
+# =========================================
 rule attach_meta_genus:
+    """Add meta columns to genus QC matrix; fill missing Site with 'NA'."""
     input:
-        wide   = "results/ml/genus_qc/ml_genus_wide_clr.qc.csv",
-        meta   = "data/meta/model_table_pooled.csv",
+        wide   = GENUS_QC_WIDE_CLR,
+        meta   = MODEL_TABLE_POOLED,
         script = f"{SCRIPTS_DIR}/attach_meta.py"
     output:
-        out = "results/ml/genus_qc/ml_genus_wide_clr.qc.withmeta.csv"
+        GENUS_WITHMETA
     shell:
         r"""
+        set -euo pipefail
+        mkdir -p {META_DIR}
         python {input.script} \
           --wide {input.wide} \
           --meta {input.meta} \
-          --out  {output.out} \
-          --id-col-wide Sample --id-col-meta Sample_ID \
-          --group-col disease --site-col site \
-          --fill-na-group Healthy --fill-na-site NA
+          --out {output} \
+          --meta-cols Sample,Group,Site,Age,Sex,BMI,PPI_use,Antibiotics_3m,Smoking,Steroids_ongoing,Immuno_ongoing,batch \
+          --fill-na-site NA
         """
 
 rule attach_meta_species:
     input:
-        wide   = "results/ml/species_qc/ml_species_wide_clr.qc.csv",
-        meta   = "data/meta/model_table_pooled.csv",
+        wide   = SPECIES_QC_WIDE_CLR,
+        meta   = MODEL_TABLE_POOLED,
         script = f"{SCRIPTS_DIR}/attach_meta.py"
     output:
-        out = "results/ml/species_qc/ml_species_wide_clr.qc.withmeta.csv"
+        SPECIES_WITHMETA
     shell:
         r"""
+        set -euo pipefail
+        mkdir -p {META_DIR}
         python {input.script} \
           --wide {input.wide} \
           --meta {input.meta} \
-          --out  {output.out} \
-          --id-col-wide Sample --id-col-meta Sample_ID \
-          --group-col disease --site-col site \
-          --fill-na-group Healthy --fill-na-site NA
+          --out {output} \
+          --meta-cols Sample,Group,Site,Age,Sex,BMI,PPI_use,Antibiotics_3m,Smoking,Steroids_ongoing,Immuno_ongoing,batch \
+          --fill-na-site NA
         """
 
-# ---------- ML (genus) ----------
-rule ml_genus:
-    input:  in_csv = f"{QC_GENUS_DIR}/ml_genus_wide_clr.qc.withmeta.csv",
-            script = f"{SCRIPTS_DIR}/ml_cv.py"
-    output: *RUN_FILES(ML_GENUS_DIR)
-    params: rank="genus", outdir=ML_GENUS_DIR, model="logreg", cvmode="stratified_kfold"
-    shell:
-        r"""
-        mkdir -p {params.outdir}
-        python {input.script} --rank {params.rank} --in-wide-clr {input.in_csv} \
-          --outdir {params.outdir} --seed {ML_SEED} --n-folds {ML_N_FOLDS} \
-          --cv-mode {params.cvmode} --model {params.model}
-        """
-
-rule ml_genus_l1:
-    input:  in_csv = f"{QC_GENUS_DIR}/ml_genus_wide_clr.qc.withmeta.csv",
-            script = f"{SCRIPTS_DIR}/ml_cv.py"
-    output: *RUN_FILES(ML_GENUS_L1_DIR)
-    params: rank="genus", outdir=ML_GENUS_L1_DIR, model="l1", cvmode="stratified_kfold"
-    shell:
-        r"""
-        mkdir -p {params.outdir}
-        python {input.script} --rank {params.rank} --in-wide-clr {input.in_csv} \
-          --outdir {params.outdir} --seed {ML_SEED} --n-folds {ML_N_FOLDS} \
-          --cv-mode {params.cvmode} --model {params.model}
-        """
-
-rule ml_genus_rf:
-    input:  in_csv = f"{QC_GENUS_DIR}/ml_genus_wide_clr.qc.withmeta.csv",
-            script = f"{SCRIPTS_DIR}/ml_cv.py"
-    output: *RUN_FILES(ML_GENUS_RF_DIR)
-    params: rank="genus", outdir=ML_GENUS_RF_DIR, model="rf", cvmode="stratified_kfold"
-    shell:
-        r"""
-        mkdir -p {params.outdir}
-        python {input.script} --rank {params.rank} --in-wide-clr {input.in_csv} \
-          --outdir {params.outdir} --seed {ML_SEED} --n-folds {ML_N_FOLDS} \
-          --cv-mode {params.cvmode} --model {params.model}
-        """
-
-rule ml_genus_lso:
-    input:  in_csv = f"{QC_GENUS_DIR}/ml_genus_wide_clr.qc.withmeta.csv",
-            script = f"{SCRIPTS_DIR}/ml_cv.py"
-    output: *RUN_FILES(ML_GENUS_LSO_DIR)
-    params: rank="genus", outdir=ML_GENUS_LSO_DIR, model="logreg", cvmode="leave_site_out"
-    shell:
-        r"""
-        mkdir -p {params.outdir}
-        python {input.script} --rank {params.rank} --in-wide-clr {input.in_csv} \
-          --outdir {params.outdir} --seed {ML_SEED} --n-folds {ML_N_FOLDS} \
-          --cv-mode {params.cvmode} --model {params.model}
-        """
-
-# ---------- ML (species) ----------
-rule ml_species:
-    input:  in_csv = f"{QC_SPECIES_DIR}/ml_species_wide_clr.qc.withmeta.csv",
-            script = f"{SCRIPTS_DIR}/ml_cv.py"
-    output: *RUN_FILES(ML_SPECIES_DIR)
-    params: rank="species", outdir=ML_SPECIES_DIR, model="logreg", cvmode="stratified_kfold"
-    shell:
-        r"""
-        mkdir -p {params.outdir}
-        python {input.script} --rank {params.rank} --in-wide-clr {input.in_csv} \
-          --outdir {params.outdir} --seed {ML_SEED} --n-folds {ML_N_FOLDS} \
-          --cv-mode {params.cvmode} --model {params.model}
-        """
-
-rule ml_species_l1:
-    input:  in_csv = f"{QC_SPECIES_DIR}/ml_species_wide_clr.qc.withmeta.csv",
-            script = f"{SCRIPTS_DIR}/ml_cv.py"
-    output: *RUN_FILES(ML_SPECIES_L1_DIR)
-    params: rank="species", outdir=ML_SPECIES_L1_DIR, model="l1", cvmode="stratified_kfold"
-    shell:
-        r"""
-        mkdir -p {params.outdir}
-        python {input.script} --rank {params.rank} --in-wide-clr {input.in_csv} \
-          --outdir {params.outdir} --seed {ML_SEED} --n-folds {ML_N_FOLDS} \
-          --cv-mode {params.cvmode} --model {params.model}
-        """
-
-rule ml_species_rf:
-    input:  in_csv = f"{QC_SPECIES_DIR}/ml_species_wide_clr.qc.withmeta.csv",
-            script = f"{SCRIPTS_DIR}/ml_cv.py"
-    output: *RUN_FILES(ML_SPECIES_RF_DIR)
-    params: rank="species", outdir=ML_SPECIES_RF_DIR, model="rf", cvmode="stratified_kfold"
-    shell:
-        r"""
-        mkdir -p {params.outdir}
-        python {input.script} --rank {params.rank} --in-wide-clr {input.in_csv} \
-          --outdir {params.outdir} --seed {ML_SEED} --n-folds {ML_N_FOLDS} \
-          --cv-mode {params.cvmode} --model {params.model}
-        """
-
-rule ml_species_lso:
-    input:  in_csv = f"{QC_SPECIES_DIR}/ml_species_wide_clr.qc.withmeta.csv",
-            script = f"{SCRIPTS_DIR}/ml_cv.py"
-    output: *RUN_FILES(ML_SPECIES_LSO_DIR)
-    params: rank="species", outdir=ML_SPECIES_LSO_DIR, model="logreg", cvmode="leave_site_out"
-    shell:
-        r"""
-        mkdir -p {params.outdir}
-        python {input.script} --rank {params.rank} --in-wide-clr {input.in_csv} \
-          --outdir {params.outdir} --seed {ML_SEED} --n-folds {ML_N_FOLDS} \
-          --cv-mode {params.cvmode} --model {params.model}
-        """
-
-# ---------- Summary ----------
-rule ml_summary:
+# =========================================
+# 8) META FIX (harmonize labels / optional NA drops)
+# =========================================
+rule fix_meta_genus:
+    """
+    Rename Group→disease (Crohn=1, Healthy=0), Site→site(lower), type-casts.
+    Also writes a list of dropped samples if any covariate-based dropping occurs.
+    """
     input:
+        GENUS_WITHMETA
+    output:
+        fixed   = "results/meta/ml_genus_wide_clr.qc.withmeta.fixed.csv",
+        dropped = "results/meta/ml_genus_dropped_samples.txt"
+    script:
+        "scripts/fix_meta.py"
+
+rule fix_meta_species:
+    input:
+        SPECIES_WITHMETA
+    output:
+        fixed   = "results/meta/ml_species_wide_clr.qc.withmeta.fixed.csv",
+        dropped = "results/meta/ml_species_dropped_samples.txt"
+    script:
+        "scripts/fix_meta.py"
+
+# =========================================
+# 9) ML — explicit rules (no dynamic f-strings)
+# =========================================
+# Genus: Logistic (L2)
+rule ml_genus:
+    input:  in_csv = "results/meta/ml_genus_wide_clr.qc.withmeta.fixed.csv",
+            script = "scripts/ml_cv.py"
+    output: *ml_outputs(ML_GENUS_DIR)
+    params: rank="genus", outdir=ML_GENUS_DIR, cvmode="stratified_kfold", nfolds=5, model="logreg"
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p {params.outdir}
+        python {input.script} \
+          --rank {params.rank} \
+          --in-wide-clr {input.in_csv} \
+          --outdir {params.outdir} \
+          --seed {ML_SEED} \
+          --n-folds {params.nfolds} \
+          --cv-mode {params.cvmode} \
+          --model {params.model}
+        """
+
+# Genus: L1 (lasso)
+rule ml_genus_l1:
+    input:  in_csv = "results/meta/ml_genus_wide_clr.qc.withmeta.fixed.csv",
+            script = "scripts/ml_cv.py"
+    output: *ml_outputs(ML_GENUS_L1_DIR)
+    params: rank="genus", outdir=ML_GENUS_L1_DIR, cvmode="stratified_kfold", nfolds=5, model="l1"
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p {params.outdir}
+        python {input.script} \
+          --rank {params.rank} \
+          --in-wide-clr {input.in_csv} \
+          --outdir {params.outdir} \
+          --seed {ML_SEED} \
+          --n-folds {params.nfolds} \
+          --cv-mode {params.cvmode} \
+          --model {params.model}
+        """
+
+# Genus: Random Forest
+rule ml_genus_rf:
+    input:  in_csv = "results/meta/ml_genus_wide_clr.qc.withmeta.fixed.csv",
+            script = "scripts/ml_cv.py"
+    output: *ml_outputs(ML_GENUS_RF_DIR)
+    params: rank="genus", outdir=ML_GENUS_RF_DIR, cvmode="stratified_kfold", nfolds=5, model="random_forest"
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p {params.outdir}
+        python {input.script} \
+          --rank {params.rank} \
+          --in-wide-clr {input.in_csv} \
+          --outdir {params.outdir} \
+          --seed {ML_SEED} \
+          --n-folds {params.nfolds} \
+          --cv-mode {params.cvmode} \
+          --model {params.model}
+        """
+
+# Genus: Leave-Site-Out (logreg), nfolds=2 (since you have 2 sites)
+rule ml_genus_lso:
+    input:  in_csv = "results/meta/ml_genus_wide_clr.qc.withmeta.fixed.csv",
+            script = "scripts/ml_cv.py"
+    output: *ml_outputs(ML_GENUS_LSO_DIR)
+    params: rank="genus", outdir=ML_GENUS_LSO_DIR, cvmode="leave_site_out", nfolds=2, model="logreg", groupcol="site"
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p {params.outdir}
+        python {input.script} \
+          --rank {params.rank} \
+          --in-wide-clr {input.in_csv} \
+          --outdir {params.outdir} \
+          --seed {ML_SEED} \
+          --n-folds {params.nfolds} \
+          --cv-mode {params.cvmode} \
+          --group-col {params.groupcol} \
+          --model {params.model}
+        """
+
+# Species: Logistic (L2)
+rule ml_species:
+    input:  in_csv = "results/meta/ml_species_wide_clr.qc.withmeta.fixed.csv",
+            script = "scripts/ml_cv.py"
+    output: *ml_outputs(ML_SPECIES_DIR)
+    params: rank="species", outdir=ML_SPECIES_DIR, cvmode="stratified_kfold", nfolds=5, model="logreg"
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p {params.outdir}
+        python {input.script} \
+          --rank {params.rank} \
+          --in-wide-clr {input.in_csv} \
+          --outdir {params.outdir} \
+          --seed {ML_SEED} \
+          --n-folds {params.nfolds} \
+          --cv-mode {params.cvmode} \
+          --model {params.model}
+        """
+
+# Species: L1 (lasso)
+rule ml_species_l1:
+    input:  in_csv = "results/meta/ml_species_wide_clr.qc.withmeta.fixed.csv",
+            script = "scripts/ml_cv.py"
+    output: *ml_outputs(ML_SPECIES_L1_DIR)
+    params: rank="species", outdir=ML_SPECIES_L1_DIR, cvmode="stratified_kfold", nfolds=5, model="l1"
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p {params.outdir}
+        python {input.script} \
+          --rank {params.rank} \
+          --in-wide-clr {input.in_csv} \
+          --outdir {params.outdir} \
+          --seed {ML_SEED} \
+          --n-folds {params.nfolds} \
+          --cv-mode {params.cvmode} \
+          --model {params.model}
+        """
+
+# Species: Random Forest
+rule ml_species_rf:
+    input:  in_csv = "results/meta/ml_species_wide_clr.qc.withmeta.fixed.csv",
+            script = "scripts/ml_cv.py"
+    output: *ml_outputs(ML_SPECIES_RF_DIR)
+    params: rank="species", outdir=ML_SPECIES_RF_DIR, cvmode="stratified_kfold", nfolds=5, model="random_forest"
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p {params.outdir}
+        python {input.script} \
+          --rank {params.rank} \
+          --in-wide-clr {input.in_csv} \
+          --outdir {params.outdir} \
+          --seed {ML_SEED} \
+          --n-folds {params.nfolds} \
+          --cv-mode {params.cvmode} \
+          --model {params.model}
+        """
+
+# Species: Leave-Site-Out (logreg), nfolds=2
+rule ml_species_lso:
+    input:  in_csv = "results/meta/ml_species_wide_clr.qc.withmeta.fixed.csv",
+            script = "scripts/ml_cv.py"
+    output: *ml_outputs(ML_SPECIES_LSO_DIR)
+    params: rank="species", outdir=ML_SPECIES_LSO_DIR, cvmode="leave_site_out", nfolds=2, model="logreg", groupcol="site"
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p {params.outdir}
+        python {input.script} \
+          --rank {params.rank} \
+          --in-wide-clr {input.in_csv} \
+          --outdir {params.outdir} \
+          --seed {ML_SEED} \
+          --n-folds {params.nfolds} \
+          --cv-mode {params.cvmode} \
+          --group-col {params.groupcol} \
+          --model {params.model}
+        """
+
+# =========================================
+# 10) SUMMARY (collate ML results)
+# =========================================
+rule ml_summary:
+    """
+    Collates genus/species run_meta + preds into:
+      - summary_overview.csv
+      - top_features.csv
+      - confusion_matrices.csv
+      - run_meta_collated.json
+    """
+    input:
+        g      = f"{ML_GENUS_DIR}/run_meta.json",
+        s      = f"{ML_SPECIES_DIR}/run_meta.json",
         script = f"{SCRIPTS_DIR}/summarize_ml_runs.py"
     output:
-        csv   = SUMMARY_CSV,
-        jsonl = SUMMARY_JSONL
+        overview  = MLSUM_OVERVIEW,
+        topfeats  = MLSUM_TOPFEATS,
+        confusion = MLSUM_CONFUSION,
+        meta_json = MLSUM_META_JSON
     params:
-        runs_glob  = "results/ml/*/cv_scores.json",
-        outdir_sum = "results/ml/summary",
-        topn       = 30,
-        plot_flag  = "--make-plots"   # اگر پلات نمی‌خواهی: ""
+        outdir      = MLSUM_DIR,
+        genus_dir   = ML_GENUS_DIR,
+        species_dir = ML_SPECIES_DIR
     shell:
         r"""
-        mkdir -p {params.outdir_sum}
+        set -euo pipefail
+        mkdir -p {params.outdir}
         python {input.script} \
-          --runs-glob "{params.runs_glob}" \
-          --out-csv {output.csv} \
-          --out-jsonl {output.jsonl} \
-          --outdir-summary {params.outdir_sum} \
-          --topn-biomarkers {params.topn} \
-          {params.plot_flag}
+          --genus-dir {params.genus_dir} \
+          --species-dir {params.species_dir} \
+          --outdir {params.outdir}
+        # Safety: ensure targets exist
+        test -f {output.overview}  || touch {output.overview}
+        test -f {output.topfeats}  || touch {output.topfeats}
+        test -f {output.confusion} || touch {output.confusion}
+        test -f {output.meta_json} || touch {output.meta_json}
         """

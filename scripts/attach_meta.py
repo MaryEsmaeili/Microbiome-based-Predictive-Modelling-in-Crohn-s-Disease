@@ -1,133 +1,159 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-import argparse, sys, re, json
+import argparse
+import json
 from pathlib import Path
-import pandas as pd, numpy as np
+import pandas as pd
+import re
 
-def parse_args():
-    p = argparse.ArgumentParser("Attach meta (Group/Site) to wide matrix; robust auto-detect + optional fills.")
-    p.add_argument("--wide", required=True)
-    p.add_argument("--meta", required=True)
-    p.add_argument("--out", required=True)
-    p.add_argument("--id-col-wide", default=None)
-    p.add_argument("--id-col-meta", default=None)
-    p.add_argument("--group-col", default=None)
-    p.add_argument("--site-col", default=None)
-    # NEW:
-    p.add_argument("--fill-na-group", default=None, help="If set, fill missing Group with this value (e.g. Healthy).")
-    p.add_argument("--fill-na-site", default=None, help="If set, fill missing Site with this value (e.g. NA).")
-    return p.parse_args()
+# ---- Default metadata columns (use any that exist) ----
+DEFAULT_META_COLS = [
+    "Sample_ID","STUDY_ID","site","disease",
+    "Age","Sex","BMI","Smoking","Antibiotics_3m","PPI_use",
+    "Steroids_ongoing","Immuno_ongoing"
+]
 
-def load_table(path):
-    path = Path(path)
-    if path.suffix.lower() in [".xlsx", ".xls"]:
-        return pd.read_excel(path)
-    try:
-        df = pd.read_csv(path)
-        if df.shape[1] == 1:
-            df = pd.read_csv(path, sep=None, engine="python")
-        return df
-    except Exception:
-        return pd.read_csv(path, sep=None, engine="python")
+def normalize_id(x: str) -> str:
+    """
+    Normalize sample IDs for robust merges:
+    - strip/uppercase
+    - drop leading 'S'
+    - keep digits only
+    - strip leading zeros
+    """
+    s = str(x).strip().upper()
+    if s.startswith('S'):
+        s = s[1:]
+    s = re.sub(r'[^0-9]', '', s)
+    s = s.lstrip('0')
+    return s if s != "" else "0"
 
-def normalize_id(x):
-    if pd.isna(x): return np.nan
-    s = str(x).strip()
-    s = re.sub(r"\s+", "", s)
-    s = s.replace("-", "").replace("_", "").upper()
-    return s
-
-def auto_pick_id_col(df, prefer=None):
-    if prefer and prefer in df.columns: return prefer
-    for c in ["Sample_ID","Sample","sample","ID","Id","id","sample_id","SampleID","sampleID"]:
-        if c in df.columns: return c
-    if df.shape[1] >= 2: return df.columns[0]
-    return df.reset_index().columns[0]
-
-def derive_group_series(meta, col):
-    s = meta[col].copy()
-    if pd.api.types.is_numeric_dtype(s):
-        return s.map(lambda v: "Crohn" if v == 1 else ("Healthy" if v == 0 else np.nan))
-    def map_text(v):
-        if pd.isna(v): return np.nan
-        t = str(v).strip().lower()
-        if t in {"crohn","cd","case","patient","ibd","uc"} or "crohn" in t or "case" in t or "patient" in t:
-            return "Crohn"
-        if t in {"healthy","control","hc"} or "health" in t or "control" in t:
-            return "Healthy"
-        return np.nan
-    return s.map(map_text)
-
-def auto_pick_group(meta, prefer=None):
-    if prefer and prefer in meta.columns:
-        return derive_group_series(meta, prefer), prefer
-    for c in ["Group","group","Diagnosis","diagnosis","Status","status","disease","Disease"]:
-        if c in meta.columns:
-            return derive_group_series(meta, c), c
-    return pd.Series([np.nan]*len(meta), index=meta.index), None
-
-def auto_pick_site(meta, prefer=None):
-    if prefer and prefer in meta.columns:
-        return meta[prefer], prefer
-    for c in ["Site","site","Tissue","tissue","BodySite","bodysite"]:
-        if c in meta.columns:
-            return meta[c], c
-    return pd.Series([np.nan]*len(meta), index=meta.index), None
+def read_table(path: str) -> pd.DataFrame:
+    p = Path(path)
+    if p.suffix.lower() in [".xlsx", ".xls"]:
+        return pd.read_excel(p)
+    return pd.read_csv(p)
 
 def main():
-    a = parse_args()
-    wide = load_table(a.wide)
-    meta = load_table(a.meta)
-    if wide.index.name is not None and wide.index.name not in wide.columns:
-        wide = wide.reset_index()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--wide", required=True, help="QC'd wide-CLR matrix (samples x features)")
+    ap.add_argument("--meta", required=True, help="Pooled metadata table (csv/xlsx)")
+    ap.add_argument("--out",  required=True, help="Output: wide + metadata")
+    ap.add_argument("--id-col-wide", default="Sample", help="Sample ID column in wide matrix")
+    ap.add_argument("--id-col-meta", default="Sample_ID", help="Sample ID column in metadata")
+    ap.add_argument("--meta-cols", default="", help="Comma-separated metadata columns to keep")
+    ap.add_argument("--fill-na-site", default=None, help="Optional site fallback value")
+    ap.add_argument("--fill-na-group", default=None, help="Optional disease fallback value")
+    args = ap.parse_args()
 
-    wide_id = auto_pick_id_col(wide, a.id_col_wide)
-    meta_id = auto_pick_id_col(meta, a.id_col_meta)
-    wide[wide_id] = wide[wide_id].map(normalize_id)
-    meta[meta_id] = meta[meta_id].map(normalize_id)
+    # ---- Load tables ----
+    wide = pd.read_csv(args.wide)
+    meta = read_table(args.meta)
 
-    g_series, g_col = auto_pick_group(meta, a.group_col)
-    s_series, s_col = auto_pick_site(meta, a.site_col)
-    meta_sub = pd.DataFrame({meta_id: meta[meta_id], "Group": g_series, "Site": s_series})
+    # ---- Trim column names ----
+    wide.columns = [c.strip() for c in wide.columns]
+    meta.columns = [c.strip() for c in meta.columns]
 
-    merged = pd.merge(wide, meta_sub, left_on=wide_id, right_on=meta_id, how="left", validate="m:1")
-    if meta_id in merged.columns: merged = merged.drop(columns=[meta_id])
+    idw = args.id_col_wide
+    idm = args.id_col_meta
 
-    # NEW: fill NA if asked
-    if a.fill_na_group is not None:
-        before = merged["Group"].isna().sum()
-        merged["Group"] = merged["Group"].fillna(a.fill_na_group)
-        after = merged["Group"].isna().sum()
-        print(f"[attach_meta] fill-na-group: {before} → {after}")
+    # ---- Basic presence checks BEFORE using ----
+    if idw not in wide.columns:
+        raise SystemExit(f"[attach_meta] wide missing id column: {idw}")
+    if idm not in meta.columns:
+        raise SystemExit(f"[attach_meta] meta missing id column: {idm}")
 
-    if a.fill_na_site is not None and "Site" in merged.columns:
-        before = merged["Site"].isna().sum()
-        merged["Site"] = merged["Site"].fillna(a.fill_na_site)
-        after = merged["Site"].isna().sum()
-        print(f"[attach_meta] fill-na-site: {before} → {after}")
+    # ---- Select metadata columns ----
+    if args.meta_cols.strip():
+        keep_meta_cols = [c.strip() for c in args.meta_cols.split(",")]
+        # ensure ID column present
+        keep_meta_cols = [idm] + [c for c in keep_meta_cols if c != idm and c in meta.columns]
+    else:
+        # use defaults that exist
+        keep_meta_cols = [c for c in DEFAULT_META_COLS if c in meta.columns]
+        if idm not in keep_meta_cols:
+            keep_meta_cols = [idm] + keep_meta_cols
 
-    n_rows = len(merged)
-    n_group_filled = merged["Group"].notna().sum()
-    site_counts = merged["Site"].fillna("NA").astype(str).str.lower().value_counts().to_dict()
+    meta_sub = meta[keep_meta_cols].copy()
+    meta_sub = meta_sub.dropna(subset=[idm])
 
-    print(f"[attach_meta] wide_id={wide_id} | meta_id={meta_id}")
-    print(f"[attach_meta] rows: {n_rows}, Group filled: {n_group_filled}")
-    print(f"[attach_meta] Site unique={len(site_counts)} | {site_counts}")
+    # ---- Normalize IDs on both sides (do NOT overwrite original IDs) ----
+    wide["_id_norm"]    = wide[idw].map(normalize_id)
+    meta_sub["_id_norm"] = meta_sub[idm].map(normalize_id)
 
-    out = Path(a.out); out.parent.mkdir(parents=True, exist_ok=True)
-    merged.to_csv(out, index=False)
+    before_n = len(wide)
 
-    side = {
-        "wide_id": wide_id, "meta_id": meta_id,
-        "group_col_used": g_col, "site_col_used": s_col,
-        "n_rows": int(n_rows), "n_group_filled": int(n_group_filled),
-        "site_counts": site_counts,
+    # ---- Single robust inner-merge ON normalized id ----
+    merged = wide.merge(
+        meta_sub,
+        on="_id_norm",
+        how="inner",
+        suffixes=("", "_meta")
+    )
+    after_n = len(merged)
+
+    # ---- Ensure we have Sample_ID column ----
+    if "Sample_ID" not in merged.columns:
+        # prefer metadata ID if available
+        if idm in merged.columns:
+            merged["Sample_ID"] = merged[idm]
+        else:
+            merged["Sample_ID"] = merged[idw]
+
+    # ---- Optional fallbacks ----
+    if args.fill_na_site and "site" in merged.columns:
+        merged["site"] = merged["site"].fillna(args.fill_na_site)
+    if args.fill_na_group and "disease" in merged.columns:
+        merged["disease"] = merged["disease"].fillna(args.fill_na_group)
+
+    # ---- Work out feature columns (exclude ID/meta helpers) ----
+    meta_order = [c for c in [
+        "Sample_ID","STUDY_ID","site","disease",
+        "Age","Sex","BMI","Smoking","Antibiotics_3m","PPI_use",
+        "Steroids_ongoing","Immuno_ongoing"
+    ] if c in merged.columns]
+
+    non_feature = set([idw, idm, "_id_norm"] + meta_order)
+    feature_cols = [c for c in merged.columns if c not in non_feature]
+
+    # ---- Fill missing feature values with zero (safe for CLR matrices) ----
+    if feature_cols:
+        merged[feature_cols] = merged[feature_cols].fillna(0)
+
+    # ---- Prefer keeping Sample_ID; drop duplicate original id columns if both exist ----
+    if idw in merged.columns and idm in merged.columns and idw != idm:
+        # keep Sample_ID; drop the original wide ID if redundant
+        if "Sample_ID" in merged.columns:
+            # keep idm only if you really need it; otherwise we can drop idw
+            merged = merged.drop(columns=[idw])
+
+    # ---- Compute dropped ids BEFORE removing helper column ----
+    dropped_norm = sorted(set(wide["_id_norm"]) - set(merged["_id_norm"]))
+
+    # ---- Column order: metadata up front, then features ----
+    front = ["Sample_ID"] if "Sample_ID" in merged.columns else [idw]
+    front += [c for c in meta_order if c not in front]
+    others = [c for c in merged.columns if c not in front and c not in ["_id_norm"]]
+    merged = merged[front + others]
+
+    # ---- Now it's safe to drop helper column from the written CSV ----
+    # (_id_norm) is already excluded by column selection above
+
+    # ---- Write output ----
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    merged.to_csv(args.out, index=False)
+
+    # ---- Lightweight log next to CSV ----
+    report = {
+        "wide_in": args.wide,
+        "meta_in": args.meta,
+        "out_csv": args.out,
+        "n_wide_samples": before_n,
+        "n_after_merge": after_n,
+        "dropped_samples_norm": dropped_norm[:200]  # preview up to 200
     }
-    with open(out.with_suffix(".attach_meta.json"), "w") as f:
-        json.dump(side, f, indent=2)
-    print(f"[attach_meta] saved: {out}")
-    print(f"[attach_meta] meta summary: {out.with_suffix('.attach_meta.json')}")
+    with open(str(Path(args.out).with_suffix(".log.json")), "w") as f:
+        json.dump(report, f, indent=2)
+    print(json.dumps(report, indent=2))
 
 if __name__ == "__main__":
     main()
