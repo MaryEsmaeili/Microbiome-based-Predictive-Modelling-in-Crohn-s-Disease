@@ -27,8 +27,7 @@ import pandas as pd
 # ============================= CONFIG =============================
 
 # Inputs (hard-coded as requested)
-CROHN_CORE_CSV     = Path("data/meta/crohn_metadata_core.csv")
-CROHN_EXTENDED_CSV = Path("data/meta/crohn_metadata_extended.csv")   # read to keep parity; not used
+CROHN_CSV     = Path("data/meta/crohn_metadata.csv")
 HEALTHY_CSV        = Path("data/meta/healthy_metadata.csv")
 
 # Outputs
@@ -224,10 +223,10 @@ def build_healthy_long(healthy_df: pd.DataFrame) -> pd.DataFrame:
 # ============================== MAIN ==============================
 
 def main() -> None:
-    crohn_core = read_csv_obj(CROHN_CORE_CSV)
+    crohn_core = read_csv_obj(CROHN_CSV)
     # keep parity; not used for building
-    if CROHN_EXTENDED_CSV.exists():
-        _ = read_csv_obj(CROHN_EXTENDED_CSV)
+    if CROHN_CSV.exists():
+        _ = read_csv_obj(CROHN_CSV)
     healthy = read_csv_obj(HEALTHY_CSV)
 
     crohn_long   = build_crohn_long(crohn_core)

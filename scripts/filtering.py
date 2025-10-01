@@ -1,149 +1,198 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Improved filtering + QC for microbiome abundance tables (Snakemake-only).
+Filtering & QC (pooled-mask per site) — Snakemake-only.
 
-Key improvements:
-- Detect input scale (percent vs fraction) and adapt abundance threshold.
-- Collapse to a single taxonomic level FIRST (default: genus), then filter.
-- Aggregation for duplicate rows at the chosen level = MEAN (not sum).
-- Site-wise feature alignment (Crohn vs Healthy) via union, if enabled.
-- Smarter QC plots: log-y for prevalence-mean; optional mean-on-positives.
-- Optional CLR emission (off by default).
+Now uses a shared color palette loaded from config/colors.yml and enforces
+standard group labels everywhere:
+    Oral_Crohn, Fecal_Crohn, Oral_Healthy, Fecal_Healthy
 
-Outputs (same names as before):
-  data/filtered/oral_abund_crohn_filtered_normalized.csv
-  data/filtered/fecal_abund_crohn_filtered_normalized.csv
-  data/filtered/oral_abund_healthy_filtered_normalized.csv
-  data/filtered/fecal_abund_healthy_filtered_normalized.csv
-  results/filtering/filtering_report.txt
-  results/filtering/filtering_barplot_allgroups.png
-  + standard QC figs in results/filtering/
+Pipeline logic (unchanged):
+1) Collapse MetaPhlAn rows to a single level (genus/species), aggregate duplicates (mean).
+2) Build ONE pooled mask per site (Crohn+Healthy together) using prevalence + abundance.
+3) Apply SAME mask back to both groups of that site.
+4) Export normalized-percent CSVs + QC figures, using consistent colors and labels.
 """
 
-import os, warnings
+import os
+import warnings
+from typing import Dict, Tuple
+
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")  # headless-safe
 import matplotlib.pyplot as plt
+import yaml  # read colors.yml
 
-# -------------- utils --------------
-def ensure_dir(path: str):
+
+# ---------------- paths / io utils ----------------
+def ensure_dir_for_file(path: str) -> None:
+    """Create parent dirs for a given file path if needed."""
     d = os.path.dirname(path)
     if d:
         os.makedirs(d, exist_ok=True)
 
-def load_data(filepath: str) -> pd.DataFrame:
+def load_table_csv(filepath: str) -> pd.DataFrame:
+    """Load CSV table (index=taxa, columns=samples) as floats."""
     df = pd.read_csv(filepath, index_col=0)
     return df.apply(pd.to_numeric, errors="coerce").fillna(0.0)
 
 def detect_scale(df: pd.DataFrame) -> str:
-    """
-    Decide if values are percent (0..100) or fraction (0..1).
-    Heuristics:
-      - if median of column sums > 10  -> 'percent' (fits MetaPhlAn multi-rank)
-      - else                           -> 'fraction'
-    """
+    """Detect scale (percent vs fraction) based on median column sum."""
     if df.shape[1] == 0:
         return "percent"
-    colsum_med = float(df.sum(axis=0).median())
-    return "percent" if colsum_med > 10 else "fraction"
+    med_sum = float(df.sum(axis=0).median())
+    return "percent" if med_sum > 10 else "fraction"
 
-# -------------- taxonomy helpers --------------
-def _has(token_list, prefix): return any(t.startswith(prefix) for t in token_list)
-def _last(token_list, prefix):
-    vals = [t for t in token_list if t.startswith(prefix)]
-    return vals[-1] if vals else None
+def normalize_to_percent(df: pd.DataFrame) -> pd.DataFrame:
+    """Column-wise normalize to 100%."""
+    if df.shape[1] == 0:
+        return df.copy()
+    colsum = df.sum(axis=0).replace(0, np.nan)
+    pct = df.div(colsum, axis=1) * 100.0
+    return pct.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+
+# ---------------- taxonomy collapsing ----------------
+def _last_with_prefix(parts, prefix):
+    hits = [p for p in parts if p.startswith(prefix)]
+    return hits[-1] if hits else None
 
 def collapse_to_level(df0: pd.DataFrame, level: str = "genus", agg: str = "mean") -> pd.DataFrame:
-    """
-    Keep exactly one taxonomic level from MetaPhlAn lineage strings.
-    Rules:
-      - genus: rows that include g__ and do NOT include s__/t__ (deepest==genus).
-      - species: rows that include s__ and do NOT include t__ (deepest==species).
-    Then aggregate duplicate keys with MEAN (or SUM if requested).
-    """
-    out_rows = {}
+    """Keep one taxonomy level (genus/species); aggregate duplicate keys with mean (default)."""
+    out: Dict[str, np.ndarray] = {}
     for name, row in df0.iterrows():
         parts = str(name).split("|")
-        g = _last(parts, "g__")
-        s = _last(parts, "s__")
-        t = _last(parts, "t__")
+        g = _last_with_prefix(parts, "g__")
+        s = _last_with_prefix(parts, "s__")
+        t = _last_with_prefix(parts, "t__")
+
         if level == "genus":
-            # only deepest genus-level rows: has g__ and no s__/t__
-            if g is not None and (s is None) and (t is None):
+            if (g is not None) and (s is None) and (t is None):
                 key = g
             else:
                 continue
         elif level == "species":
-            # only deepest species-level rows: has s__ and no t__
-            if s is not None and (t is None):
+            if (s is not None) and (t is None):
                 key = (g + "|" + s) if g is not None else s
             else:
                 continue
         else:
             raise ValueError(f"Unsupported level: {level}")
-        accum = out_rows.get(key)
-        out_rows[key] = row.values if accum is None else np.vstack([accum, row.values])
-    if not out_rows:
+
+        arr = row.values.astype(float)
+        if key not in out:
+            out[key] = arr
+        else:
+            out[key] = np.vstack([out[key], arr])
+
+    if not out:
         return pd.DataFrame(index=[], columns=df0.columns, dtype=float)
 
-    # aggregate
-    keys = []
-    mats = []
-    for k, v in out_rows.items():
-        if v.ndim == 1:
-            vec = v.astype(float)
-        else:
-            if agg == "sum":
-                vec = v.astype(float).sum(axis=0)
-            else:
-                vec = v.astype(float).mean(axis=0)
+    keys, mats = [], []
+    for k, v in out.items():
+        vec = v if v.ndim == 1 else (v.mean(axis=0) if agg == "mean" else v.sum(axis=0))
         keys.append(k); mats.append(vec)
-    out = pd.DataFrame(mats, index=keys, columns=df0.columns)
-    # drop all-zero taxa
-    return out.loc[out.sum(axis=1) > 0]
 
-# -------------- stats helpers --------------
-def zeros_by_sample(df):  # frac zeros per sample
-    if df.shape[0] == 0: return pd.Series(dtype=float)
+    out_df = pd.DataFrame(mats, index=keys, columns=df0.columns)
+    return out_df.loc[out_df.sum(axis=1) > 0]
+
+
+# ---------------- pooled-mask core ----------------
+def build_pooled_mask(df_c: pd.DataFrame, df_h: pd.DataFrame,
+                      prevalence: float, abundance_param: float,
+                      level: str, agg: str) -> Tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """Create pooled (Crohn+Healthy) mask and apply to both, per site."""
+    c_lvl = collapse_to_level(df_c, level=level, agg=agg)
+    h_lvl = collapse_to_level(df_h, level=level, agg=agg)
+    pooled = pd.concat([c_lvl, h_lvl], axis=1).fillna(0.0)
+
+    scale = detect_scale(pooled)
+    abundance_thr = abundance_param if scale == "percent" else (abundance_param / 100.0)
+
+    prev = (pooled > 0).sum(axis=1) / max(1, pooled.shape[1])
+    max_abund = pooled.max(axis=1)
+    mask = (prev >= prevalence) & (max_abund >= abundance_thr)
+
+    c_filt = c_lvl.loc[mask].copy()
+    h_filt = h_lvl.loc[mask].copy()
+
+    qc = {
+        "scale": scale,
+        "rows_before_c": int(c_lvl.shape[0]),
+        "rows_before_h": int(h_lvl.shape[0]),
+        "rows_after": int(mask.sum()),
+        "prevalence": prevalence,
+        "abundance_param": abundance_param,
+        "abundance_applied": abundance_thr,
+    }
+    return c_filt, h_filt, qc
+
+
+# ---------------- colors / labels ----------------
+CANONICAL = ["Fecal_Crohn", "Oral_Crohn", "Fecal_Healthy", "Oral_Healthy"]
+
+def load_colors_yaml(path: str) -> Dict[str, str]:
+    """Load colors.yml and return a mapping canonical_label -> color."""
+    with open(path, "r") as f:
+        cfg = yaml.safe_load(f)
+    # Expect keys: group, synonyms (both optional but recommended)
+    group_colors = cfg.get("group", {}) or {}
+    synonyms = cfg.get("synonyms", {}) or {}
+
+    # Build canonical mapping (apply synonyms)
+    canon_map = {}
+    for canon in CANONICAL:
+        # direct color
+        color = group_colors.get(canon)
+        if color:
+            canon_map[canon] = color
+
+    # Fill via synonyms if missing
+    for canon, syns in synonyms.items():
+        if canon in CANONICAL and canon not in canon_map:
+            for s in syns:
+                if s in group_colors:
+                    canon_map[canon] = group_colors[s]
+                    break
+
+    # Fallback generic colors if anything missing
+    default_cycle = plt.rcParams["axes.prop_cycle"].by_key().get("color", [])
+    for i, canon in enumerate(CANONICAL):
+        if canon not in canon_map:
+            canon_map[canon] = default_cycle[i % len(default_cycle)] if default_cycle else "#999999"
+    return canon_map
+
+def canonicalize(label: str, synonyms: Dict[str, list]) -> str:
+    """Resolve any input label to one of the canonical labels."""
+    if label in CANONICAL:
+        return label
+    for canon, syns in (synonyms or {}).items():
+        if canon in CANONICAL and label in (syns or []):
+            return canon
+    return label  # return as-is if unknown (shouldn't happen here)
+
+def get_palette(colors_yaml_path: str) -> Tuple[Dict[str, str], Dict[str, list]]:
+    """Return (palette, synonyms) from yaml."""
+    with open(colors_yaml_path, "r") as f:
+        cfg = yaml.safe_load(f)
+    palette = load_colors_yaml(colors_yaml_path)  # canonical -> color
+    synonyms = cfg.get("synonyms", {}) or {}
+    return palette, synonyms
+
+
+# ---------------- QC helpers / plots ----------------
+def zeros_by_sample(df: pd.DataFrame) -> pd.Series:
+    if df.shape[0] == 0:
+        return pd.Series(dtype=float)
     return (df == 0).sum(axis=0) / df.shape[0]
 
-def zeros_by_taxon(df):
-    if df.shape[1] == 0: return pd.Series(dtype=float)
+def zeros_by_taxon(df: pd.DataFrame) -> pd.Series:
+    if df.shape[1] == 0:
+        return pd.Series(dtype=float)
     return (df == 0).sum(axis=1) / df.shape[1]
 
-def normalize_pct(df):
-    if df.shape[1] == 0: return df
-    pct = df.div(df.sum(axis=0), axis=1) * 100.0
-    return pct.replace([np.inf, -np.inf], np.nan).dropna(axis=0, how="all").dropna(axis=1, how="all")
-
-def transform_clr_from_rel(df_rel, pseudocount=1e-6):
-    if df_rel.shape[1] == 0:
-        return df_rel
-    X = df_rel + pseudocount
-    logX = np.log(X)
-    clr = logX.sub(logX.mean(axis=0), axis=1)
-    clr = clr.replace([np.inf, -np.inf], np.nan)
-    clr = clr.dropna(axis=0, how="all").dropna(axis=1, how="all")
-    return clr
-
-# -------------- filtering --------------
-def remove_low_abundance(df, thr, scale):
-    """thr given in PERCENT if scale=='percent', in FRACTION if 'fraction'."""
-    if df.shape[1] == 0: return df
-    if scale == "fraction":
-        threshold = thr
-    else:
-        threshold = thr  # already percent
-    # Work on the chosen level table; keep taxa whose max >= threshold
-    return df[df.max(axis=1) >= threshold]
-
-def remove_low_prevalence(df, prev):
-    if df.shape[1] == 0: return df
-    p = (df > 0).sum(axis=1) / df.shape[1]
-    return df[p >= prev]
-
-# -------------- plotting --------------
 def _safe_kde_or_hist(ax, series, label, color):
     s = pd.Series(series).dropna().astype(float)
     n = int(s.size)
@@ -156,16 +205,15 @@ def _safe_kde_or_hist(ax, series, label, color):
     else:
         ax.plot([], [], label=f"{label} (n=0)", color=color)
 
-def prevalence_mean_scatter(ax, df_before, df_after, label, color, prevalence_thr, abundance_thr, scale, mean_on_positives=False):
+def prevalence_mean_scatter(ax, df_before, df_after, label, color,
+                            prevalence_thr, abundance_thr, scale, mean_on_positives=False):
+    """Scatter of prevalence vs mean (log-y), colored by group."""
     def _prev_mean(df):
-        if df.shape[1]==0:
+        if df.shape[1] == 0:
             return pd.DataFrame(columns=["prev","mean"])
-        prev = (df>0).sum(axis=1)/max(1,df.shape[1])
-        if mean_on_positives:
-            means = df.replace(0,np.nan).mean(axis=1).fillna(0.0)
-        else:
-            means = df.mean(axis=1)
-        return pd.DataFrame({"prev":prev, "mean":means})
+        prev = (df > 0).sum(axis=1) / max(1, df.shape[1])
+        mean = df.replace(0, np.nan).mean(axis=1).fillna(0.0) if mean_on_positives else df.mean(axis=1)
+        return pd.DataFrame({"prev": prev, "mean": mean})
 
     pm_b = _prev_mean(df_before); pm_a = _prev_mean(df_after)
     ax.scatter(pm_b["prev"], pm_b["mean"], s=10, alpha=0.25, color=color, label=f"{label} (before)")
@@ -178,224 +226,227 @@ def prevalence_mean_scatter(ax, df_before, df_after, label, color, prevalence_th
     ax.set_yscale("log")
     ax.legend()
 
-# -------------- per-group processing --------------
-def process_group(name, inp_path, prevalence, abundance_thr, level, agg, pseudocount, emit_clr, scale):
-    # load
-    df_raw = load_data(inp_path)
 
-    # collapse FIRST
-    df_lvl = collapse_to_level(df_raw, level=level, agg=agg)
-
-    # keep a copy before filtering for QC
-    df_before = df_lvl.copy()
-
-    # filtering order: prevalence -> abundance (safer)
-    df1 = remove_low_prevalence(df_lvl, prevalence)
-    df2 = remove_low_abundance(df1, abundance_thr, scale)
-
-    # export normalized % and optional CLR
-    df_pct = normalize_pct(df2)
-    df_rel = df2.div(df2.sum(axis=0), axis=1).replace([np.inf, -np.inf], 0.0).fillna(0.0)
-    if emit_clr:
-        df_clr = transform_clr_from_rel(df_rel, pseudocount=pseudocount)
-    else:
-        df_clr = None
-
-    qc = {
-        "df_raw": df_raw,        # multi-level raw
-        "df_before": df_before,  # level table before filtering
-        "df_after": df2,         # level table after filtering
-        "z_s_before": zeros_by_sample(df_before),
-        "z_s_after":  zeros_by_sample(df2),
-        "z_t_before": zeros_by_taxon(df_before),
-        "z_t_after":  zeros_by_taxon(df2),
-        "retained_pct": (df2.sum(axis=0) / df_before.sum(axis=0).replace(0,np.nan) * 100.0).fillna(0.0)
-    }
-    return df_pct, df_clr, qc
-
-# -------------- Snakemake entry --------------
+# ----------------------------- main (Snakemake) -----------------------------
 if "snakemake" not in globals():
     raise RuntimeError("This script must be executed via Snakemake (no CLI supported).")
 
+# Inputs
 oral_in          = snakemake.input["oral"]           # noqa: F821
 fecal_in         = snakemake.input["fecal"]          # noqa: F821
 healthy_oral_in  = snakemake.input["healthy_oral"]   # noqa: F821
 healthy_fecal_in = snakemake.input["healthy_fecal"]  # noqa: F821
 
+# Outputs (CSV)
 oral_out_pct          = snakemake.output["oral_norm"]           # noqa: F821
 fecal_out_pct         = snakemake.output["fecal_norm"]          # noqa: F821
 healthy_oral_out_pct  = snakemake.output["healthy_oral_norm"]   # noqa: F821
 healthy_fecal_out_pct = snakemake.output["healthy_fecal_norm"]  # noqa: F821
 
-# optional CLR sidecars
-oral_out_clr          = oral_out_pct.replace(".csv", "_clr.csv")
-fecal_out_clr         = fecal_out_pct.replace(".csv", "_clr.csv")
-healthy_oral_out_clr  = healthy_oral_out_pct.replace(".csv", "_clr.csv")
-healthy_fecal_out_clr = healthy_fecal_out_pct.replace(".csv", "_clr.csv")
+# Outputs (figs/reports)
+report_path  = snakemake.output["report"]              # results/filtering/filtering_report.txt
+barplot_png  = snakemake.output["barplot"]             # results/filtering/filtering_barplot_allgroups.png
+fig_zero_sample = snakemake.output["zsample"]          # results/filtering/zero_fraction_by_sample.png
+fig_zero_taxon  = snakemake.output["ztaxon"]           # results/filtering/zero_fraction_by_taxon.png
+fig_libsize     = snakemake.output["libsize"]          # results/filtering/library_size_distribution.png
+fig_rank_oral   = snakemake.output["rank_oral_comb"]   # results/filtering/rank_abundance_oral_combined.png
+fig_rank_fecal  = snakemake.output["rank_fecal_comb"]  # results/filtering/rank_abundance_fecal_combined.png
+fig_prev_oral   = snakemake.output["prev_oral_comb"]   # results/filtering/prevalence_mean_scatter_oral_combined.png
+fig_prev_fecal  = snakemake.output["prev_fecal_comb"]  # results/filtering/prevalence_mean_scatter_fecal_combined.png
 
-report_path = snakemake.output["report"]    # noqa: F821
-barplot_png = snakemake.output["barplot"]   # noqa: F821
-
-# params (with sensible defaults)
-prevalence_default = float(snakemake.params.get("prevalence", 0.20))         # fallback
+# Params
+prevalence_default = float(snakemake.params.get("prevalence", 0.20))
 prevalence_oral    = float(snakemake.params.get("prevalence_oral", prevalence_default))
 prevalence_fecal   = float(snakemake.params.get("prevalence_fecal", prevalence_default))
-abundance_param    = float(snakemake.params.get("abundance", 0.1))           # interpreted by scale
-level_mode         = str(snakemake.params.get("level", "genus")).lower()     # "genus"|"species"
+abundance_param    = float(snakemake.params.get("abundance", 0.1))
+level_mode         = str(snakemake.params.get("level", "species")).lower()   # "genus"|"species"
 agg_mode           = str(snakemake.params.get("agg", "mean")).lower()        # "mean"|"sum"
-pseudocount        = float(snakemake.params.get("pseudocount", 1e-6))
-qc_level           = str(snakemake.params.get("qc_level", "lite")).lower()   # "lite"|"full"
-align_by_site      = bool(snakemake.params.get("align_by_site", True))
-emit_clr           = bool(snakemake.params.get("emit_clr", False))
 mean_on_positives  = bool(snakemake.params.get("mean_on_positives", False))
+colors_yaml_path   = str(snakemake.params.get("colors_yaml", "config/colors.yml"))
 
-# Load once to detect scale on each group (they should match; but detect per file anyway)
-_oral_df0  = load_data(oral_in)
-_fecal_df0 = load_data(fecal_in)
-scale_oral  = detect_scale(_oral_df0)    # expect 'percent'
-scale_fecal = detect_scale(_fecal_df0)
+# Load color palette + synonyms
+palette, synonyms = get_palette(colors_yaml_path)
 
-# abundance threshold is interpreted in the detected scale
-abundance_thr_oral  = abundance_param if scale_oral  == "percent" else abundance_param / 100.0
-abundance_thr_fecal = abundance_param if scale_fecal == "percent" else abundance_param / 100.0
+# Helper: standard names and colors for each group
+COLORS = {
+    "Fecal_Crohn":   palette["Fecal_Crohn"],
+    "Oral_Crohn":    palette["Oral_Crohn"],
+    "Fecal_Healthy": palette["Fecal_Healthy"],
+    "Oral_Healthy":  palette["Oral_Healthy"],
+}
 
-# process all four groups
-oral_pct, oral_clr, qc_crohn_oral = process_group("Crohn-Oral", oral_in,
-    prevalence_oral, abundance_thr_oral, level_mode, agg_mode, pseudocount, emit_clr, scale_oral)
+# Load data
+oral_crohn_raw    = load_table_csv(oral_in)
+oral_healthy_raw  = load_table_csv(healthy_oral_in)
+fecal_crohn_raw   = load_table_csv(fecal_in)
+fecal_healthy_raw = load_table_csv(healthy_fecal_in)
 
-fecal_pct, fecal_clr, qc_crohn_fecal = process_group("Crohn-Fecal", fecal_in,
-    prevalence_fecal, abundance_thr_fecal, level_mode, agg_mode, pseudocount, emit_clr, scale_fecal)
+# Build pooled masks (ORAL & FECAL)
+oral_c_filt,  oral_h_filt,  qc_oral  = build_pooled_mask(
+    oral_crohn_raw,  oral_healthy_raw,
+    prevalence=prevalence_oral, abundance_param=abundance_param,
+    level=level_mode, agg=agg_mode
+)
+fecal_c_filt, fecal_h_filt, qc_fecal = build_pooled_mask(
+    fecal_crohn_raw, fecal_healthy_raw,
+    prevalence=prevalence_fecal, abundance_param=abundance_param,
+    level=level_mode, agg=agg_mode
+)
 
-h_oral_pct, h_oral_clr, qc_healthy_oral = process_group("Healthy-Oral", healthy_oral_in,
-    prevalence_oral, abundance_thr_oral, level_mode, agg_mode, pseudocount, emit_clr, scale_oral)
+# Normalize to percent for outputs
+oral_c_pct   = normalize_to_percent(oral_c_filt)
+oral_h_pct   = normalize_to_percent(oral_h_filt)
+fecal_c_pct  = normalize_to_percent(fecal_c_filt)
+fecal_h_pct  = normalize_to_percent(fecal_h_filt)
 
-h_fecal_pct, h_fecal_clr, qc_healthy_fecal = process_group("Healthy-Fecal", healthy_fecal_in,
-    prevalence_fecal, abundance_thr_fecal, level_mode, agg_mode, pseudocount, emit_clr, scale_fecal)
+# Save CSVs
+ensure_dir_for_file(oral_out_pct);          oral_c_pct.to_csv(oral_out_pct)
+ensure_dir_for_file(healthy_oral_out_pct);  oral_h_pct.to_csv(healthy_oral_out_pct)
+ensure_dir_for_file(fecal_out_pct);         fecal_c_pct.to_csv(fecal_out_pct)
+ensure_dir_for_file(healthy_fecal_out_pct); fecal_h_pct.to_csv(healthy_fecal_out_pct)
 
-# align feature sets by site (union)
-if align_by_site:
-    # ORAL
-    union_oral = sorted(set(oral_pct.index) | set(h_oral_pct.index))
-    oral_pct   = oral_pct.reindex(union_oral).fillna(0.0)
-    h_oral_pct = h_oral_pct.reindex(union_oral).fillna(0.0)
-    # FECAL
-    union_fecal = sorted(set(fecal_pct.index) | set(h_fecal_pct.index))
-    fecal_pct   = fecal_pct.reindex(union_fecal).fillna(0.0)
-    h_fecal_pct = h_fecal_pct.reindex(union_fecal).fillna(0.0)
-
-# write normalized outputs
-ensure_dir(oral_out_pct);         oral_pct.to_csv(oral_out_pct)
-ensure_dir(fecal_out_pct);        fecal_pct.to_csv(fecal_out_pct)
-ensure_dir(healthy_oral_out_pct); h_oral_pct.to_csv(healthy_oral_out_pct)
-ensure_dir(healthy_fecal_out_pct);h_fecal_pct.to_csv(healthy_fecal_out_pct)
-
-# (optional) CLR sidecars
-if emit_clr:
-    oral_clr.to_csv(oral_out_clr)
-    fecal_clr.to_csv(fecal_out_clr)
-    h_oral_clr.to_csv(healthy_oral_out_clr)
-    h_fecal_clr.to_csv(healthy_fecal_out_clr)
-
-# textual report (steps condensed since collapse-first)
-ensure_dir(report_path)
+# ---------------- Report ----------------
+ensure_dir_for_file(report_path)
 with open(report_path, "w") as f:
-    def _w(title, qc):
-        f.write(f"[{title}]\n")
-        f.write(f"scale={detect_scale(qc['df_raw'])}, level={level_mode}, agg={agg_mode}\n")
-        f.write(f"rows_before_level={qc['df_before'].shape[0]}, rows_after_filter={qc['df_after'].shape[0]}\n\n")
-    _w("Crohn-Oral", qc_crohn_oral)
-    _w("Crohn-Fecal", qc_crohn_fecal)
-    _w("Healthy-Oral", qc_healthy_oral)
-    _w("Healthy-Fecal", qc_healthy_fecal)
+    f.write("== Filtering report (pooled-mask per site) ==\n\n")
+    f.write(f"Level={level_mode}, Aggregation={agg_mode}\n")
+    f.write(f"Prevalence oral={prevalence_oral:.3f}, fecal={prevalence_fecal:.3f}\n")
+    f.write(f"Abundance parameter={abundance_param} (applied per detected scale)\n\n")
+    f.write("[ORAL]\n")
+    f.write(f"scale={qc_oral['scale']}, rows_before_c={qc_oral['rows_before_c']}, "
+            f"rows_before_h={qc_oral['rows_before_h']}, rows_after={qc_oral['rows_after']}\n")
+    f.write(f"abundance_thr_applied={qc_oral['abundance_applied']}\n\n")
+    f.write("[FECAL]\n")
+    f.write(f"scale={qc_fecal['scale']}, rows_before_c={qc_fecal['rows_before_c']}, "
+            f"rows_before_h={qc_fecal['rows_before_h']}, rows_after={qc_fecal['rows_after']}\n")
+    f.write(f"abundance_thr_applied={qc_fecal['abundance_applied']}\n\n")
 
-# aggregated barplot (counts before/after per group)
-ensure_dir(barplot_png)
-labels = ["Before(level)", "After"]
-width  = 0.20
-groups = ["Crohn-Fecal","Crohn-Oral","Healthy-Oral","Healthy-Fecal"]
-counts_before = [
-    qc_crohn_fecal["df_before"].shape[0],
-    qc_crohn_oral["df_before"].shape[0],
-    qc_healthy_oral["df_before"].shape[0],
-    qc_healthy_fecal["df_before"].shape[0],
-]
-counts_after = [
-    qc_crohn_fecal["df_after"].shape[0],
-    qc_crohn_oral["df_after"].shape[0],
-    qc_healthy_oral["df_after"].shape[0],
-    qc_healthy_fecal["df_after"].shape[0],
-]
+# ---------------- QC plots (colored by COLORS) ----------------
+for p in [barplot_png, fig_zero_sample, fig_zero_taxon, fig_libsize,
+          fig_rank_oral, fig_rank_fecal, fig_prev_oral, fig_prev_fecal]:
+    ensure_dir_for_file(p)
+
+# 1) Barplot: counts before/after (use canonical order & colors)
+groups = ["Fecal_Crohn","Oral_Crohn","Oral_Healthy","Fecal_Healthy"]
+counts_before = [qc_fecal["rows_before_c"], qc_oral["rows_before_c"],
+                 qc_oral["rows_before_h"],  qc_fecal["rows_before_h"]]
+counts_after  = [qc_fecal["rows_after"],    qc_oral["rows_after"],
+                 qc_oral["rows_after"],     qc_fecal["rows_after"]]
+x = np.arange(len(groups)); width = 0.35
 plt.figure(figsize=(10,5))
-x = np.arange(len(groups))
-plt.bar(x - width/2, counts_before, width=width, label="Before(level)")
-plt.bar(x + width/2, counts_after,  width=width, label="After")
+plt.bar(x - width/2, counts_before, width=width, label="Before(level)",
+        color="#30638e")
+plt.bar(x + width/2, counts_after,  width=width, label="After(mask)",
+        color="#d1495b")
 plt.xticks(x, groups); plt.ylabel("Number of taxa")
-plt.title("Number of taxa before vs after filtering (level-collapsed)")
+plt.title("Number of taxa before (level) vs after (pooled-mask)")
 plt.legend(); plt.tight_layout(); plt.savefig(barplot_png); plt.close()
 
-# Global QC (after)
-outdir = os.path.join("results","filtering")
-ensure_dir(os.path.join(outdir,"_dummy"))
+# Precompute collapse-only (BEFORE) for rank/prev plots
+oral_c_lvl = collapse_to_level(oral_crohn_raw,  level=level_mode, agg=agg_mode)
+oral_h_lvl = collapse_to_level(oral_healthy_raw,level=level_mode, agg=agg_mode)
+fecal_c_lvl= collapse_to_level(fecal_crohn_raw, level=level_mode, agg=agg_mode)
+fecal_h_lvl= collapse_to_level(fecal_healthy_raw,level=level_mode, agg=agg_mode)
 
-# zero fraction by sample & taxon (AFTER)
-fig, ax = plt.subplots(figsize=(7,5))
-for lbl, qc in [("Crohn-Fecal", qc_crohn_fecal), ("Crohn-Oral", qc_crohn_oral),
-                ("Healthy-Oral", qc_healthy_oral), ("Healthy-Fecal", qc_healthy_fecal)]:
-    _safe_kde_or_hist(ax, qc["z_s_after"], lbl, None)
-ax.set_xlabel("Zero fraction per sample"); ax.set_title("Zero-inflation (by sample)"); ax.legend()
-fig.tight_layout(); fig.savefig(os.path.join(outdir, "zero_fraction_by_sample.png")); plt.close(fig)
+# 2) Zero fractions AFTER (per sample / per taxon)
+plt.figure(figsize=(7,5)); ax = plt.gca()
+_safe_kde_or_hist(ax, zeros_by_sample(fecal_c_filt),  "Fecal_Crohn",   COLORS["Fecal_Crohn"])
+_safe_kde_or_hist(ax, zeros_by_sample(oral_c_filt),   "Oral_Crohn",    COLORS["Oral_Crohn"])
+_safe_kde_or_hist(ax, zeros_by_sample(oral_h_filt),   "Oral_Healthy",  COLORS["Oral_Healthy"])
+_safe_kde_or_hist(ax, zeros_by_sample(fecal_h_filt),  "Fecal_Healthy", COLORS["Fecal_Healthy"])
+ax.set_xlabel("Zero fraction per sample"); ax.set_title("Zero-inflation (by sample) AFTER mask")
+ax.legend(); plt.tight_layout(); plt.savefig(fig_zero_sample); plt.close()
 
-fig, ax = plt.subplots(figsize=(7,5))
-for lbl, qc in [("Crohn-Fecal", qc_crohn_fecal), ("Crohn-Oral", qc_crohn_oral),
-                ("Healthy-Oral", qc_healthy_oral), ("Healthy-Fecal", qc_healthy_fecal)]:
-    _safe_kde_or_hist(ax, qc["z_t_after"], lbl, None)
-ax.set_xlabel("Zero fraction per taxon"); ax.set_title("Zero-inflation (by taxon)"); ax.legend()
-fig.tight_layout(); fig.savefig(os.path.join(outdir, "zero_fraction_by_taxon.png")); plt.close(fig)
+plt.figure(figsize=(7,5)); ax = plt.gca()
+_safe_kde_or_hist(ax, zeros_by_taxon(fecal_c_filt),  "Fecal_Crohn",   COLORS["Fecal_Crohn"])
+_safe_kde_or_hist(ax, zeros_by_taxon(oral_c_filt),   "Oral_Crohn",    COLORS["Oral_Crohn"])
+_safe_kde_or_hist(ax, zeros_by_taxon(oral_h_filt),   "Oral_Healthy",  COLORS["Oral_Healthy"])
+_safe_kde_or_hist(ax, zeros_by_taxon(fecal_h_filt),  "Fecal_Healthy", COLORS["Fecal_Healthy"])
+ax.set_xlabel("Zero fraction per taxon"); ax.set_title("Zero-inflation (by taxon) AFTER mask")
+ax.legend(); plt.tight_layout(); plt.savefig(fig_zero_taxon); plt.close()
 
-# retained mass (AFTER vs BEFORE at chosen level)
-fig, ax = plt.subplots(figsize=(7,5))
-for lbl, qc in [("Crohn-Fecal", qc_crohn_fecal), ("Crohn-Oral", qc_crohn_oral),
-                ("Healthy-Oral", qc_healthy_oral), ("Healthy-Fecal", qc_healthy_fecal)]:
-    _safe_kde_or_hist(ax, qc["retained_pct"], lbl, None)
-ax.set_xlim(0, 100); ax.set_xlabel("Retained mass after filtering (%)")
-ax.set_title("Retained mass distribution (per sample)"); ax.legend()
-fig.tight_layout(); fig.savefig(os.path.join(outdir, "library_size_distribution.png")); plt.close(fig)
+# 3) Retained mass AFTER vs BEFORE (per sample)
+def _retained_pct(df_before: pd.DataFrame, df_after: pd.DataFrame) -> pd.Series:
+    b = df_before.sum(axis=0).replace(0, np.nan)
+    a = df_after.sum(axis=0)
+    return (a.div(b) * 100.0).fillna(0.0)
 
-# site-wise prevalence-mean (log-y)
-def _prevmean_plot(site_name, qc1, qc2, outname):
-    plt.figure(figsize=(7,5))
-    ax = plt.gca()
-    prevalence_mean_scatter(ax, qc1["df_before"], qc1["df_after"], "Crohn",  "#6b5b95",
-                            prevalence_oral if site_name=="oral" else prevalence_fecal,
-                            abundance_param, "percent", mean_on_positives)
-    prevalence_mean_scatter(ax, qc2["df_before"], qc2["df_after"], "Healthy","#6497b1",
-                            prevalence_oral if site_name=="oral" else prevalence_fecal,
-                            abundance_param, "percent", mean_on_positives)
-    ax.set_title(f"{site_name.capitalize()}: prevalence vs mean abundance (log-y)")
-    plt.tight_layout(); plt.savefig(os.path.join(outdir, outname)); plt.close()
+ret_all = pd.concat([
+    _retained_pct(fecal_c_lvl, fecal_c_filt),
+    _retained_pct(oral_c_lvl,  oral_c_filt),
+    _retained_pct(oral_h_lvl,  oral_h_filt),
+    _retained_pct(fecal_h_lvl, fecal_h_filt),
+], ignore_index=True)
 
-_prevmean_plot("oral",  qc_crohn_oral,  qc_healthy_oral,  "prevalence_mean_scatter_oral_combined.png")
-_prevmean_plot("fecal", qc_crohn_fecal, qc_healthy_fecal, "prevalence_mean_scatter_fecal_combined.png")
+plt.figure(figsize=(7,5)); ax = plt.gca()
+_safe_kde_or_hist(ax, ret_all, "All groups", "#666666")
+ax.set_xlim(0, 100)
+ax.set_xlabel("Retained mass after filtering (%)")
+ax.set_title("Retained mass distribution (per sample)")
+ax.legend(); plt.tight_layout(); plt.savefig(fig_libsize); plt.close()
 
-# rank-abundance (mean across samples, log-y) at chosen level
+# 4) Rank-abundance (mean across samples, log-y) BEFORE vs AFTER, per site
 def _rank_curve(df):
     if df.shape[0] == 0: return np.array([])
     v = df.mean(axis=1).sort_values(ascending=False).values
     return v[v > 0]
 
-def _rank_plot(site_name, qc1, qc2, outname):
-    plt.figure(figsize=(7,5))
-    rb = _rank_curve(qc1["df_before"]); ra = _rank_curve(qc1["df_after"])
-    hb = _rank_curve(qc2["df_before"]); ha = _rank_curve(qc2["df_after"])
-    if rb.size: plt.plot(np.arange(1, rb.size+1), rb, lw=1.2, ls="--", label="Crohn (before)")
-    if ra.size: plt.plot(np.arange(1, ra.size+1), ra, lw=1.6, ls="-",  label="Crohn (after)")
-    if hb.size: plt.plot(np.arange(1, hb.size+1), hb, lw=1.2, ls="--", label="Healthy (before)")
-    if ha.size: plt.plot(np.arange(1, ha.size+1), ha, lw=1.6, ls="-",  label="Healthy (after)")
-    plt.xlabel("Rank"); plt.ylabel("Mean abundance (%)"); plt.yscale("log")
-    plt.title(f"{site_name.capitalize()}: rank-abundance (mean across samples, {level_mode})")
-    plt.legend(); plt.tight_layout(); plt.savefig(os.path.join(outdir, outname)); plt.close()
+# Oral
+rb = _rank_curve(oral_c_lvl); ra = _rank_curve(oral_c_filt)
+hb = _rank_curve(oral_h_lvl); ha = _rank_curve(oral_h_filt)
+plt.figure(figsize=(7,5))
+if rb.size: plt.plot(np.arange(1, rb.size+1), rb, lw=1.2, ls="--",
+                     label="Oral_Crohn (before)",  color=COLORS["Oral_Crohn"])
+if ra.size: plt.plot(np.arange(1, ra.size+1), ra, lw=1.6, ls="-",
+                     label="Oral_Crohn (after)",   color=COLORS["Oral_Crohn"])
+if hb.size: plt.plot(np.arange(1, hb.size+1), hb, lw=1.2, ls="--",
+                     label="Oral_Healthy (before)", color=COLORS["Oral_Healthy"])
+if ha.size: plt.plot(np.arange(1, ha.size+1), ha, lw=1.6, ls="-",
+                     label="Oral_Healthy (after)",  color=COLORS["Oral_Healthy"])
+plt.xlabel("Rank"); plt.ylabel("Mean abundance (%)"); plt.yscale("log")
+plt.title(f"Oral: rank-abundance ({level_mode})")
+plt.legend(); plt.tight_layout(); plt.savefig(fig_rank_oral); plt.close()
 
-_rank_plot("oral",  qc_crohn_oral,  qc_healthy_oral,  "rank_abundance_oral_combined.png")
-_rank_plot("fecal", qc_crohn_fecal, qc_healthy_fecal, "rank_abundance_fecal_combined.png")
+# Fecal
+rb = _rank_curve(fecal_c_lvl); ra = _rank_curve(fecal_c_filt)
+hb = _rank_curve(fecal_h_lvl); ha = _rank_curve(fecal_h_filt)
+plt.figure(figsize=(7,5))
+if rb.size: plt.plot(np.arange(1, rb.size+1), rb, lw=1.2, ls="--",
+                     label="Fecal_Crohn (before)",  color=COLORS["Fecal_Crohn"])
+if ra.size: plt.plot(np.arange(1, ra.size+1), ra, lw=1.6, ls="-",
+                     label="Fecal_Crohn (after)",   color=COLORS["Fecal_Crohn"])
+if hb.size: plt.plot(np.arange(1, hb.size+1), hb, lw=1.2, ls="--",
+                     label="Fecal_Healthy (before)", color=COLORS["Fecal_Healthy"])
+if ha.size: plt.plot(np.arange(1, ha.size+1), ha, lw=1.6, ls="-",
+                     label="Fecal_Healthy (after)",  color=COLORS["Fecal_Healthy"])
+plt.xlabel("Rank"); plt.ylabel("Mean abundance (%)"); plt.yscale("log")
+plt.title(f"Fecal: rank-abundance ({level_mode})")
+plt.legend(); plt.tight_layout(); plt.savefig(fig_rank_fecal); plt.close()
 
-print(f"[filtering] Done (level={level_mode}, agg={agg_mode}, align_by_site={align_by_site}, emit_clr={emit_clr}).")
+# 5) Prevalence-mean scatter (log-y), colored by palette
+def _prevmean_plot(site_label, c_raw, h_raw, c_after, h_after,
+                   prevalence_thr, abundance_thr, scale, outfile):
+    plt.figure(figsize=(7,5)); ax = plt.gca()
+    prevalence_mean_scatter(
+        ax,
+        collapse_to_level(c_raw, level=level_mode, agg=agg_mode),
+        c_after, "Oral_Crohn" if site_label=="oral" else "Fecal_Crohn",
+        COLORS["Oral_Crohn"] if site_label=="oral" else COLORS["Fecal_Crohn"],
+        prevalence_thr, abundance_thr, scale, mean_on_positives
+    )
+    prevalence_mean_scatter(
+        ax,
+        collapse_to_level(h_raw, level=level_mode, agg=agg_mode),
+        h_after, "Oral_Healthy" if site_label=="oral" else "Fecal_Healthy",
+        COLORS["Oral_Healthy"] if site_label=="oral" else COLORS["Fecal_Healthy"],
+        prevalence_thr, abundance_thr, scale, mean_on_positives
+    )
+    ax.set_title(f"{site_label.capitalize()}: prevalence vs mean (log-y)")
+    plt.tight_layout(); plt.savefig(outfile); plt.close()
+
+_prevmean_plot("oral",  oral_crohn_raw,  oral_healthy_raw,  oral_c_filt,  oral_h_filt,
+               prevalence_oral,  qc_oral["abundance_applied"],  qc_oral["scale"],  fig_prev_oral)
+_prevmean_plot("fecal", fecal_crohn_raw, fecal_healthy_raw, fecal_c_filt, fecal_h_filt,
+               prevalence_fecal, qc_fecal["abundance_applied"], qc_fecal["scale"], fig_prev_fecal)
+
+print(f"[filtering] Done (pooled-mask per site, level={level_mode}, agg={agg_mode}, colors from {colors_yaml_path}).")

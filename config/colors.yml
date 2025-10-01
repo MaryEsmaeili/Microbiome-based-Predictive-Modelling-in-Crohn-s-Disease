@@ -1,8 +1,8 @@
 group:
-  Fecal_Crohn:   "#78688E"
-  Oral_Crohn:    "#B499E5"
-  Fecal_Healthy: "#416388"
-  Oral_Healthy:  "#7FB3D5"
+  Fecal_Crohn:   "#30638e"
+  Oral_Crohn:    "#edae49"
+  Fecal_Healthy: "#d1495b"
+  Oral_Healthy:  "#00798c"
 synonyms:
   Fecal_Crohn:   ["Crohn-Fecal", "Fecal_Crohn"]
   Oral_Crohn:    ["Crohn-Oral", "Oral_Crohn"]
