@@ -1,10 +1,12 @@
+# These are read by both R (beta_diversity.R) and Python
 group:
   Fecal_Crohn:   "#30638e"
   Oral_Crohn:    "#edae49"
   Fecal_Healthy: "#d1495b"
   Oral_Healthy:  "#00798c"
+
 synonyms:
   Fecal_Crohn:   ["Crohn-Fecal", "Fecal_Crohn"]
-  Oral_Crohn:    ["Crohn-Oral", "Oral_Crohn"]
+  Oral_Crohn:    ["Crohn-Oral",  "Oral_Crohn"]
   Fecal_Healthy: ["Healthy-Fecal", "Fecal_Healthy"]
-  Oral_Healthy:  ["Healthy-Oral", "Oral_Healthy"]
+  Oral_Healthy:  ["Healthy-Oral",  "Oral_Healthy"]

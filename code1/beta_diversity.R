@@ -1,28 +1,33 @@
 #!/usr/bin/env Rscript
 # =============================================================================
-# Beta Diversity (Bray/Jaccard/Aitchison) — minimal, principled covariates
+# Beta Diversity (Bray/Jaccard/Aitchison) — with & without covariates
 #
-# Changes implemented (per user request):
-#   - Pair structure respected via strata/blocks (STUDY_ID) for with-cov and interaction models.
-#   - Add PERMANOVA sensitivity on Aitchison (CLR + Euclidean) for nocov/with-cov/interaction.
-#   - Scale continuous covariates (Age, BMI) only when actually used.
-#   - set.seed(42) before adonis2 for reproducibility.
-#   - PCoA legends show group counts as "(n=##)" instead of a subtitle line.
-#   - DO NOT change the default number of permutations (keep 999).
+# What this script does
+#   • Reads four abundance tables (Oral/Fecal × Crohn/Healthy) — already filtered/normalized.
+#   • Normalizes Sample_IDs to pooled-meta convention:
+#       drop ".<rep>" suffix, drop leading "S", keep digits only, strip leading zeros.
+#   • Aligns features to intersection across matrices (fair distance comparisons).
+#   • Computes Bray-Curtis, Jaccard, and Aitchison (CLR+Euclidean) distances.
+#   • PCoA plots:
+#       - All four groups together
+#       - Crohn vs Healthy within oral, within fecal
+#       - Crohn paired oral–fecal with connecting segments
+#   • PERMANOVA per site (with covariates and without), interaction (disease*site),
+#     and PERMDISP per site (Bray). Writes companion *_counts.csv with n’s & notes.
+#   • Summaries: group distances (Bray/Jaccard), paired oral–fecal distances (Crohn).
+#   • Saves colors actually used as JSON for reproducibility.
 #
-# Covariates policy (minimal pre-exposure confounders):
-#   Minimal (with_cov): Age, Sex, BMI, Smoking
-#
-# Outputs:
-#   - PCoA PNGs (all groups + within-site CH + paired-lines)
-#   - PERMANOVA CSVs for Bray (nocov/with_cov) + Aitchison (nocov/with_cov)
-#   - PERMANOVA CSVs for disease*site interaction (Bray + Aitchison) with minimal covariates
-#   - PERMDISP (Bray) per site
-#   - beta_group_distances.csv (Bray + Jaccard)
-#   - pairwise_oral_fecal_summary.csv (Bray, Crohn pairs)
-#
-# Notes:
-#   - Only minimal pre-exposure confounders are used (no treatment/severity) to avoid over-adjustment.
+# CLI:
+#   --oral-crohn    PATH
+#   --fecal-crohn   PATH
+#   --oral-healthy  PATH
+#   --fecal-healthy PATH
+#   --covariates    PATH   (optional)
+#   --pairs         PATH   (optional)
+#   --colors        PATH   (optional YAML palette; supports legacy and group/synonyms)
+#   --outdir        PATH   (Snakemake provides results/beta_models/{level})
+#   --pseudocount   NUM    (default 1e-6; for Aitchison CLR)
+#   --permutations  INT    (default 999)
 # =============================================================================
 
 suppressPackageStartupMessages({
@@ -30,37 +35,7 @@ suppressPackageStartupMessages({
   library(vegan); library(stringr); library(purrr); library(yaml); library(jsonlite)
 })
 
-# ---------- Helpers: coercion & IDs ----------
-norm_sex <- function(x) {
-  y <- tolower(trimws(as.character(x)))
-  ifelse(y %in% c("m","male","1"), 1L,
-         ifelse(y %in% c("f","female","0"), 0L, NA_integer_))
-}
-to_bin01 <- function(x) {
-  y <- tolower(trimws(as.character(x)))
-  dplyr::case_when(
-    y %in% c("1","yes","y","true","t","on","present","current","pos","+") ~ 1L,
-    y %in% c("0","no","n","false","f","off","absent","none","neg","-")      ~ 0L,
-    suppressWarnings(!is.na(as.numeric(y)) & as.numeric(y) %in% c(0,1))     ~ as.integer(as.numeric(y)),
-    TRUE ~ NA_integer_
-  )
-}
-to_num <- function(x) suppressWarnings(as.numeric(as.character(x)))
-
-normalize_id <- function(x) {
-  if (is.na(x)) return(NA_character_)
-  s <- toupper(trimws(as.character(x)))
-  s <- gsub("\\.\\d+$", "", s)      # drop .1, .2 ...
-  s <- sub("^S", "", s)             # drop leading S
-  s <- gsub("[^0-9]", "", s)        # keep digits only
-  s <- sub("^0+", "", s)            # drop leading zeros
-  ifelse(nzchar(s), s, "0")
-}
-
-`%||%` <- function(a,b) if (is.null(a)) b else if (is.atomic(a) && length(a)==1 && is.character(a) && !nzchar(a)) b else a
-or_null <- function(a,b) if (is.null(a)) b else a
-
-# ---------------------------- CLI ----------------------------
+# ---------------------------- CLI parsing -------------------------------
 args <- commandArgs(trailingOnly = TRUE)
 get_arg <- function(flag, default = NULL) {
   i <- which(args == flag)
@@ -76,23 +51,28 @@ pairs_path         <- get_arg("--pairs")
 colors_path        <- get_arg("--colors")
 outdir             <- get_arg("--outdir", "results/beta_models")
 pseudo             <- as.numeric(get_arg("--pseudocount", "1e-6"))
-nperm              <- as.integer(get_arg("--permutations", "999")) # DO NOT change default per user request
+nperm              <- as.integer(get_arg("--permutations", "999"))
 
 dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
 dbgdir <- file.path(outdir, "debug"); dir.create(dbgdir, showWarnings = FALSE)
 
-# --------------------- Colors ---------------------
+# Safe OR helpers
+`%||%`    <- function(a,b) if (is.null(a)) b else if (is.atomic(a) && length(a)==1 && is.character(a) && !nzchar(a)) b else a
+or_null   <- function(a,b) if (is.null(a)) b else a   # never calls is.na() (safe for lists)
+
+# --------------------- palette (legacy + new schema) --------------------
 load_group_colors <- function(yaml_path) {
   defaults <- c(
-    "Crohn-Oral"    = "#edae49",
-    "Healthy-Oral"  = "#00798c",
-    "Crohn-Fecal"   = "#30638e",
-    "Healthy-Fecal" = "#d1495b"
+    "Fecal_Crohn" =   "#30638e",
+    "Oral_Crohn" =    "#edae49",
+    "Fecal_Healthy" = "#d1495b",
+    "Oral_Healthy" =  "#00798c"
   )
   if (is.null(yaml_path) || !file.exists(yaml_path)) return(defaults)
   cfg <- tryCatch(yaml::read_yaml(yaml_path), error = function(e) NULL)
   if (is.null(cfg)) return(defaults)
 
+  # Legacy: flat "colors" mapping
   if (!is.null(cfg$colors) && is.list(cfg$colors)) {
     col <- cfg$colors
     get1 <- function(name, def) {
@@ -107,12 +87,50 @@ load_group_colors <- function(yaml_path) {
       "Healthy-Fecal" = get1("Healthy-Fecal", defaults[["Healthy-Fecal"]])
     ))
   }
-  defaults
+
+  # New schema: group + synonyms (like alpha). Use or_null to avoid is.na on lists.
+  group <- or_null(cfg$group,    list())
+  syn   <- or_null(cfg$synonyms, list())
+
+  pick <- function(key, def) {
+    if (!is.null(group[[key]]) && nzchar(as.character(group[[key]])[1])) {
+      return(as.character(group[[key]])[1])
+    }
+    al <- syn[[key]]
+    if (!is.null(al) && length(al)) {
+      for (a in al) {
+        if (!is.null(group[[a]]) && nzchar(as.character(group[[a]])[1])) {
+          return(as.character(group[[a]])[1])
+        }
+      }
+    }
+    def
+  }
+
+  co <- pick("Oral_Crohn",    defaults[["Crohn-Oral"]])
+  ho <- pick("Oral_Healthy",  defaults[["Healthy-Oral"]])
+  cf <- pick("Fecal_Crohn",   defaults[["Crohn-Fecal"]])
+  hf <- pick("Fecal_Healthy", defaults[["Healthy-Fecal"]])
+
+  c("Crohn-Oral" = co, "Healthy-Oral" = ho,
+    "Crohn-Fecal" = cf, "Healthy-Fecal" = hf)
 }
+
 pal_named <- load_group_colors(colors_path)
 write_json(as.list(pal_named), file.path(outdir, "colors_used.json"), pretty = TRUE, auto_unbox = TRUE)
 
-# ------------------ Abundance IO ------------------
+# --------------------- ID normalization (pooled-meta rules) -------------
+normalize_id <- function(x) {
+  if (is.na(x)) return(NA_character_)
+  s <- toupper(trimws(as.character(x)))
+  s <- gsub("\\.\\d+$", "", s)
+  s <- sub("^S", "", s)
+  s <- gsub("[^0-9]", "", s)
+  s <- sub("^0+", "", s)
+  ifelse(nzchar(s), s, "0")
+}
+
+# ------------------ abundance IO & transforms ---------------------------
 safe_read_csv <- function(p) {
   if (is.null(p) || !file.exists(p)) return(tibble())
   suppressMessages(readr::read_csv(p, show_col_types = FALSE))
@@ -165,20 +183,17 @@ mk_dist <- function(M, method) {
   list(D = stats::as.dist(dm[good, good, drop = FALSE]), labs = colnames(M)[good])
 }
 
-# --------------- Covariates & pairs (robust IO) ---------------
-COV_READ <- c(
-  "Age","Sex","BMI","Smoking","Antibiotics_3m","PPI_use",
-  "STUDY_ID","Study_ID","subject","Subject","ID","id"
-)
-COV_PLAN_MIN <- c("Age","Sex","BMI","Smoking")
+# ----------------------- covariates & pairs (robust) --------------------
+COV_CANDS <- c("Age","Sex","BMI","Smoking","Antibiotics_3m","PPI_use","Steroids_ongoing","Immuno_ongoing")
 
 read_covariates_robust <- function(path) {
   cv <- safe_read_csv(path)
-  if (nrow(cv) == 0) return(tibble())
+  if (nrow(cv) == 0) return(tibble())  # gracefully empty
 
   pick_col <- function(nm, cands) { x <- intersect(cands, nm); if (length(x)) x[[1]] else NA_character_ }
+
   id_col   <- pick_col(names(cv), c("Sample_ID","SampleID","sample_id","Sample","sample","ID","id"))
-  site_col <- pick_col(names(cv), c("site","Site","type","Type","SITE"))
+  site_col <- pick_col(names(cv), c("site","Site","type","Type","SITE","site_bin","site01","site_numeric"))
   dis_col  <- pick_col(names(cv), c("disease","Disease","status","Status","phenotype","Phenotype","group","Group","label","Label"))
 
   map_site <- function(x) {
@@ -209,22 +224,9 @@ read_covariates_robust <- function(path) {
     disease   = if (!is.na(dis_col))  map_dis(cv[[dis_col]])  else NA_integer_
   )
 
-  md <- dplyr::bind_cols(md, cv %>% dplyr::select(dplyr::any_of(COV_READ))) %>%
+  md <- dplyr::bind_cols(md, cv %>% dplyr::select(dplyr::any_of(COV_CANDS))) %>%
     dplyr::mutate(Sample_ID = vapply(Sample_ID, normalize_id, character(1))) %>%
     dplyr::distinct()
-
-  # Coerce
-  if ("Sex" %in% names(md)) md$Sex <- norm_sex(md$Sex)
-  for (b in intersect(c("Smoking","Antibiotics_3m","PPI_use"), names(md))) md[[b]] <- to_bin01(md[[b]])
-  for (v in intersect(c("Age","BMI"), names(md))) md[[v]] <- to_num(md[[v]])
-
-  # unify STUDY_ID column if present under different names
-  sid_col <- intersect(c("STUDY_ID","Study_ID","subject","Subject","ID","id"), names(md))
-  if (length(sid_col)) {
-    md$STUDY_ID <- as.character(md[[sid_col[1]]])
-  } else {
-    md$STUDY_ID <- NA_character_
-  }
   md
 }
 
@@ -244,53 +246,55 @@ read_pairs <- function(path) {
   ) %>% filter(!is.na(oral), !is.na(fecal))
 }
 
-# ------------------------------ Plotting ------------------------------
+# ------------------------------ plotting --------------------------------
+save_placeholder_png <- function(path, msg="Insufficient data") {
+  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+  g <- ggplot() + theme_void() + annotate("text", 0, 0, label = msg, size = 5)
+  ggsave(path, g, width = 6, height = 5, dpi = 300, bg = "white")
+}
+write_note_csv <- function(path, note="no_data") {
+  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+  write_csv(tibble(note = note), path)
+}
+write_counts_csv <- function(path, site, n_total, n_h, n_c, note="ok") {
+  write_csv(tibble(site=site, n_total=n_total, n_healthy=n_h, n_crohn=n_c, note=note), path)
+}
+count_hc <- function(vec) { c(h=sum(vec==0,na.rm=TRUE), c=sum(vec==1,na.rm=TRUE)) }
+
 pct_from_cmdscale <- function(ord) {
   if (is.null(ord$eig) || all(is.na(ord$eig))) return(c(NA, NA))
   vals <- ord$eig; keep <- which(vals > 0); if (!length(keep)) keep <- seq_along(vals)
   p <- vals / sum(abs(vals)); p[1:2] * 100
 }
 
-# Build legend labels with counts: e.g., "Crohn-Oral (n=41)"
-legend_labels_with_n <- function(group_vec, palette_named) {
-  lv <- unique(na.omit(group_vec))
-  lab <- setNames(character(length(lv)), lv)
-  for (g in lv) lab[[g]] <- sprintf("%s (n=%d)", g, sum(group_vec == g, na.rm = TRUE))
-  list(levels=lv, labels=lab[lv], palette=palette_named[names(palette_named) %in% lv])
-}
-
-pcoa_plot <- function(D, group_map_named, png_file, title_txt, palette_named) {
-  if (is.null(D) || length(D) == 0) {
-    g <- ggplot() + theme_void() + annotate("text", 0, 0, label = "No distance (too few samples)", size = 5)
-    ggsave(png_file, g, width = 6.4, height = 5.2, dpi = 300, bg = "white"); return(invisible(NULL))
-  }
+pcoa_plot <- function(D, lab_factor, png_file, title_txt, palette_named, subtitle_counts=NULL) {
+  if (is.null(D) || length(D) == 0) { save_placeholder_png(png_file, "No distance (too few samples)"); return(invisible(NULL)) }
   ord  <- cmdscale(D, eig = TRUE, k = 2)
   labs <- labels(D)
-  grp  <- factor(unname(group_map_named[labs]))
-  labinfo <- legend_labels_with_n(grp, palette_named)
-
-  df <- tibble(Axis1 = ord$points[,1], Axis2 = ord$points[,2], Group = factor(grp, levels = labinfo$levels))
+  df <- tibble(Axis1 = ord$points[,1], Axis2 = ord$points[,2],
+               Group = factor(lab_factor[labs], levels = names(palette_named)))
   pp <- pct_from_cmdscale(ord)
   lx <- ifelse(is.na(pp[1]), "PCoA 1", sprintf("PCoA 1 (%.1f%%)", pp[1]))
   ly <- ifelse(is.na(pp[2]), "PCoA 2", sprintf("PCoA 2 (%.1f%%)", pp[2]))
-
+  pal_use <- palette_named[names(palette_named) %in% levels(df$Group)]
   g <- ggplot(df, aes(Axis1, Axis2, color = Group, fill = Group)) +
-    geom_point(size = 2.3, alpha = 0.9, shape = 21, stroke = 0.2) +
+    geom_point(size = 2.2, alpha = 0.9, shape = 21, stroke = 0.2) +
     { if (nrow(df) >= 6 && dplyr::n_distinct(df$Group) >= 2) stat_ellipse(type="norm", linewidth=0.6, alpha=0.12) else NULL } +
-    scale_color_manual(values = labinfo$palette, breaks = labinfo$levels, labels = unname(unlist(labinfo$labels)), drop = FALSE) +
-    scale_fill_manual(values  = labinfo$palette, breaks = labinfo$levels, labels = unname(unlist(labinfo$labels)), drop = FALSE) +
+    scale_color_manual(values = pal_use, drop = FALSE) +
+    scale_fill_manual(values = pal_use, drop = FALSE) +
     theme_bw(base_size = 12) + coord_equal() +
-    labs(title = title_txt, x = lx, y = ly)
+    labs(
+      title = title_txt,
+      subtitle = subtitle_counts %||% NULL,
+      x = lx, y = ly
+    )
   ggsave(png_file, g, width = 6.4, height = 5.2, dpi = 300, bg = "white")
   invisible(NULL)
 }
 
 pcoa_plot_paired_lines <- function(D, pairs_df, png_file, title_txt,
-                                   color_oral="#B499E5", color_fecal="#78688E") {
-  if (is.null(D) || length(D) == 0 || nrow(pairs_df) == 0) {
-    g <- ggplot() + theme_void() + annotate("text", 0, 0, label = "No paired data", size = 5)
-    ggsave(png_file, g, width = 6.4, height = 5.2, dpi = 300, bg = "white"); return(invisible(NULL))
-  }
+                                   color_oral="#B499E5", color_fecal="#78688E", subtitle_counts=NULL) {
+  if (is.null(D) || length(D) == 0 || nrow(pairs_df) == 0) { save_placeholder_png(png_file, "No paired data"); return(invisible(NULL)) }
   ord  <- cmdscale(D, eig = TRUE, k = 2)
   labs <- labels(D)
   df <- tibble(Sample_ID = labs, Axis1 = ord$points[,1], Axis2 = ord$points[,2])
@@ -303,61 +307,18 @@ pcoa_plot_paired_lines <- function(D, pairs_df, png_file, title_txt,
     geom_segment(data = seg_df, aes(x = o1, y = o2, xend = f1, yend = f2),
                  color = "grey60", linewidth = 0.6, alpha = 0.7) +
     geom_point(data = df %>% filter(Sample_ID %in% pairs_df$oral),
-               aes(Axis1, Axis2), color = color_oral, size = 2.3) +
+               aes(Axis1, Axis2), color = color_oral, size = 2.2) +
     geom_point(data = df %>% filter(Sample_ID %in% pairs_df$fecal),
-               aes(Axis1, Axis2), color = color_fecal, size = 2.3) +
+               aes(Axis1, Axis2), color = color_fecal, size = 2.2) +
     theme_bw(base_size = 12) + coord_equal() +
-    labs(title = title_txt, x = "PCoA 1", y = "PCoA 2")
+    labs(title = title_txt,
+         subtitle = subtitle_counts %||% NULL,
+         x = "PCoA 1", y = "PCoA 2")
   ggsave(png_file, g, width = 6.4, height = 5.2, dpi = 300, bg = "white")
   invisible(NULL)
 }
 
-# ---------------------------- Model utilities ----------------------------
-write_note_csv   <- function(path, note="no_data")   { dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE); write_csv(tibble(note = note), path) }
-write_counts_csv <- function(path, site, n_total, n_h, n_c, note="ok") { write_csv(tibble(site=site, n_total=n_total, n_healthy=n_h, n_crohn=n_c, note=note), path) }
-count_hc <- function(vec) { c(h=sum(vec==0,na.rm=TRUE), c=sum(vec==1,na.rm=TRUE)) }
-
-build_fallback_md <- function(lst_mats, labs, site_name=NULL) {
-  k1 <- if (!is.null(lst_mats[[1]])) ncol(lst_mats[[1]]) else 0L  # Crohn first
-  k2 <- if (!is.null(lst_mats[[2]])) ncol(lst_mats[[2]]) else 0L  # Healthy next
-  tibble(Sample_ID = labs, site = site_name %||% NA_character_,
-         disease   = c(rep(1L, k1), rep(0L, k2)))
-}
-
-select_minimal_covars <- function(md_df) {
-  cand <- intersect(COV_PLAN_MIN, names(md_df))
-  usable <- c()
-  for (v in cand) {
-    vv <- md_df[[v]]
-    if (sum(!is.na(vv)) >= 3 && dplyr::n_distinct(vv, na.rm=TRUE) >= 2) usable <- c(usable, v)
-  }
-  usable
-}
-
-# Scale Age/BMI if used (keep Sex/Smoking binary as is)
-scale_continuous_if_used <- function(md_df, usable_names) {
-  out <- md_df
-  for (v in intersect(c("Age","BMI"), usable_names)) {
-    if (v %in% names(out)) {
-      vv <- suppressWarnings(as.numeric(out[[v]]))
-      if (sum(is.finite(vv)) >= 3 && stats::sd(vv, na.rm=TRUE) > 0) out[[v]] <- as.numeric(scale(vv))
-    }
-  }
-  out
-}
-
-adonis2_with_optional_strata <- function(D, formula, data, nperm, strata_vec=NULL) {
-  set.seed(42)
-  Dx <- D  # <<< ensure the symbol used in the formula exists in this frame
-  if (!is.null(strata_vec) && all(!is.na(strata_vec))) {
-    ctrl <- vegan::how(blocks = strata_vec)
-    vegan::adonis2(formula, data = data, permutations = ctrl, by = "margin")
-  } else {
-    vegan::adonis2(formula, data = data, permutations = nperm, by = "margin")
-  }
-}
-
-# ---------------------------- Main ----------------------------
+# ---------------------------- Main workflow -----------------------------
 main <- function() {
   # Read abundances
   OC <- read_abund_matrix(oral_crohn_path, pseudo)
@@ -369,7 +330,7 @@ main <- function() {
   L <- align_features(list(OC, FC, OH, FH))
   if (length(L) == 4) { OC <- L[[1]]; FC <- L[[2]]; OH <- L[[3]]; FH <- L[[4]] }
 
-  # Group labels
+  # Group labels for plotting
   labs_from <- function(M, label) {
     if (is.null(M) || ncol(M) == 0) setNames(character(0), character(0))
     else setNames(rep(label, ncol(M)), colnames(M))
@@ -384,128 +345,160 @@ main <- function() {
   M_all <- do.call(cbind, Filter(Negate(is.null), list(OC, FC, OH, FH)))
 
   # Covariates & pairs
-  covars   <- read_covariates_robust(covars_path)
+  covars <- read_covariates_robust(covars_path)
   pairs_df <- read_pairs(pairs_path)
 
-  # ---------------- PCoA (all groups) ----------------
+  # ---- Debug: overlap between matrix IDs and covariates ----
+  labs_all <- colnames(M_all)
+  if (length(labs_all)) {
+    readr::write_csv(
+      tibble(Sample_ID = labs_all, in_covars = labs_all %in% covars$Sample_ID),
+      file.path(dbgdir, "debug_id_overlap.csv")
+    )
+  }
+
+  # ------------------------ PCoA (all groups) ---------------------------
+  ncounts <- table(factor(unname(group_map_named), levels=names(pal_named)))
+  subtitle_all <- if (length(ncounts)) paste(sprintf("%s=%d", names(ncounts), as.integer(ncounts)), collapse=" | ") else NULL
+
   Db_all <- mk_dist(drop_bad_for_dist(M_all, "bray"),    "bray")$D
   Dj_all <- mk_dist(drop_bad_for_dist(M_all, "jaccard"), "jaccard")$D
+  # Aitchison uses same filtered columns as Bray for fair comparison
   Da_all <- mk_aitchison(drop_bad_for_dist(M_all, "bray"), pseudo)$D
 
   pcoa_plot(Db_all, group_map_named, file.path(outdir, "pcoa_bray_allgroups.png"),
-            "PCoA — All Groups (Bray-Curtis)", pal_named)
+            "PCoA — All Groups (Bray-Curtis distance)", pal_named, subtitle_all)
   pcoa_plot(Dj_all, group_map_named, file.path(outdir, "pcoa_jaccard_allgroups.png"),
-            "PCoA — All Groups (Jaccard)",     pal_named)
+            "PCoA — All Groups (Jaccard distance)",     pal_named, subtitle_all)
   pcoa_plot(Da_all, group_map_named, file.path(outdir, "pcoa_aitchison_allgroups.png"),
-            "PCoA — All Groups (Aitchison: CLR + Euclidean)", pal_named)
+            "PCoA — All Groups (Aitchison: CLR + Euclidean)", pal_named, subtitle_all)
 
-  # ----- PCoA: Crohn vs Healthy within site (Bray) -----
+  # ---------------- PCoA: Crohn vs Healthy within site -----------------
   Mb_oral  <- do.call(cbind, Filter(Negate(is.null), list(OC, OH)))
   Mb_fecal <- do.call(cbind, Filter(Negate(is.null), list(FC, FH)))
   Db_oral  <- mk_dist(drop_bad_for_dist(Mb_oral,  "bray"), "bray")$D
   Db_fecal <- mk_dist(drop_bad_for_dist(Mb_fecal, "bray"), "bray")$D
 
+  sub_oral_counts  <- paste("Healthy-Oral =", ncol(OH) %||% 0, "| Crohn-Oral =", ncol(OC) %||% 0)
+  sub_fecal_counts <- paste("Healthy-Fecal=", ncol(FH) %||% 0, "| Crohn-Fecal=", ncol(FC) %||% 0)
+
   pcoa_plot(Db_oral,  c(lab_oral_c,  lab_oral_h),
             file.path(outdir, "pcoa_bray_oral_CH.png"),
-            "PCoA — Oral: Crohn vs Healthy (Bray-Curtis)", pal_named[c("Crohn-Oral","Healthy-Oral")])
+            "PCoA — Oral: Crohn vs Healthy (Bray-Curtis)", pal_named[c("Crohn-Oral","Healthy-Oral")],
+            sub_oral_counts)
   pcoa_plot(Db_fecal, c(lab_fecal_c, lab_fecal_h),
             file.path(outdir, "pcoa_bray_fecal_CH.png"),
-            "PCoA — Fecal: Crohn vs Healthy (Bray-Curtis)", pal_named[c("Crohn-Fecal","Healthy-Fecal")])
+            "PCoA — Fecal: Crohn vs Healthy (Bray-Curtis)", pal_named[c("Crohn-Fecal","Healthy-Fecal")],
+            sub_fecal_counts)
 
-  # ----- Paired Crohn oral–fecal (Bray) -----
+  # ---------------- Paired Crohn oral–fecal (Bray) ----------------------
   M_crohn_of <- do.call(cbind, Filter(Negate(is.null), list(OC, FC)))
   Db_pairs <- mk_dist(drop_bad_for_dist(M_crohn_of, "bray"), "bray")$D
   pcoa_plot_paired_lines(Db_pairs, pairs_df,
                          file.path(outdir, "pcoa_bray_oral_vs_fecal_paired.png"),
                          "PCoA — Crohn Oral vs Fecal (paired; Bray-Curtis)",
                          color_oral = pal_named[["Crohn-Oral"]],
-                         color_fecal= pal_named[["Crohn-Fecal"]])
+                         color_fecal= pal_named[["Crohn-Fecal"]],
+                         subtitle_counts = paste("n pairs input =", nrow(pairs_df)))
 
-  # -------------- PERMANOVA (Bray/Aitchison) --------------
-  run_permanova_site <- function(M_case, M_ctrl, site_name, with_cov = FALSE, method = c("bray","aitchison"),
-                                 out_csv, out_counts_csv) {
-    method <- match.arg(method)
+  # -------------- PERMANOVA helpers (Bray) ------------------------------
+  build_fallback_md <- function(lst_mats, labs, site_name=NULL) {
+    k1 <- if (!is.null(lst_mats[[1]])) ncol(lst_mats[[1]]) else 0L  # Crohn first
+    k2 <- if (!is.null(lst_mats[[2]])) ncol(lst_mats[[2]]) else 0L  # Healthy next
+    tibble(
+      Sample_ID = labs,
+      site      = site_name %||% NA_character_,
+      disease   = c(rep(1L, k1), rep(0L, k2))
+    )
+  }
+
+  permanova_with_cov <- function(M_case, M_ctrl, site_name, covars, out_csv, out_counts_csv, permutations=999) {
     if (is.null(M_case) || is.null(M_ctrl)) { write_note_csv(out_csv, "no_matrix"); write_counts_csv(out_counts_csv, site_name, 0,0,0,"no_matrix"); return(invisible(NULL)) }
     lst <- align_features(list(M_case, M_ctrl))
     if (length(lst) < 2) { write_note_csv(out_csv, "no_common_features"); write_counts_csv(out_counts_csv, site_name,0,0,0,"no_common_features"); return(invisible(NULL)) }
     M <- cbind(lst[[1]], lst[[2]]); labs <- colnames(M)
 
     md <- covars %>% filter(tolower(site) == tolower(site_name), Sample_ID %in% labs)
-    if (nrow(md) < 3 || dplyr::n_distinct(md$disease) < 2) md <- build_fallback_md(lst, labs, site_name)
+
     if (nrow(md) < 3 || dplyr::n_distinct(md$disease) < 2) {
-      write_note_csv(out_csv, "insufficient_md"); hc <- count_hc(md$disease)
-      write_counts_csv(out_counts_csv, site_name, nrow(md), hc["h"], hc["c"], "insufficient_md"); return(invisible(NULL))
+      md <- build_fallback_md(lst, labs, site_name)
+    }
+    if (nrow(md) < 3 || dplyr::n_distinct(md$disease) < 2) {
+      write_note_csv(out_csv, "insufficient_md")
+      hc <- count_hc(md$disease); write_counts_csv(out_counts_csv, site_name, nrow(md), hc["h"], hc["c"], "insufficient_md")
+      return(invisible(NULL))
     }
 
-    # distance
-    if (method == "bray") {
-      Mb <- drop_bad_for_dist(M[, md$Sample_ID, drop=FALSE], "bray")
-      Dx <- mk_dist(Mb, "bray")$D
-    } else {
-      Mb <- M[, md$Sample_ID, drop=FALSE]
-      Dx <- mk_aitchison(Mb, pseudo)$D
-    }
-    if (is.null(Dx)) { write_note_csv(out_csv,"dist_null"); write_counts_csv(out_counts_csv, site_name, nrow(md), NA, NA, "dist_null"); return(invisible(NULL)) }
+    Mb <- drop_bad_for_dist(M[, md$Sample_ID, drop=FALSE], "bray")
+    Db <- mk_dist(Mb, "bray")$D
+    if (is.null(Db)) { write_note_csv(out_csv,"dist_null"); write_counts_csv(out_counts_csv, site_name, nrow(md), NA, NA, "dist_null"); return(invisible(NULL)) }
 
-    labs_b <- labels(Dx); md_b <- md[match(labs_b, md$Sample_ID), , drop = FALSE]
+    labs_b <- labels(Db); md_b <- md[match(labs_b, md$Sample_ID), , drop = FALSE]
 
-    if (with_cov) {
-      usable <- select_minimal_covars(md_b)
-      md_b   <- scale_continuous_if_used(md_b, usable)
-      rhs    <- paste(c("disease", usable), collapse = " + ")
-      fml    <- stats::as.formula(paste("Dx ~", rhs))
-      res    <- adonis2_with_optional_strata(Dx, fml, md_b, nperm,
-                                             strata_vec = if ("STUDY_ID" %in% names(md_b)) md_b$STUDY_ID else NULL)
-      out <- as.data.frame(res); out$term <- rownames(out); rownames(out) <- NULL
-      out <- out %>% rename(Df=Df, SumOfSqs=SumOfSqs, R2=R2, F=`F`, p=`Pr(>F)`) %>% select(term, Df, SumOfSqs, R2, F, p)
-      out$covars_used <- paste(usable, collapse = ", ")
-      write_csv(out, out_csv)
-      hc <- count_hc(md_b$disease)
-      write_counts_csv(out_counts_csv, site_name, nrow(md_b), hc["h"], hc["c"],
-                       if (length(usable)) paste0("covars: ", paste(usable, collapse=", ")) else "covars: none")
-    } else {
-      res <- adonis2_with_optional_strata(Dx, Dx ~ disease, md_b, nperm, strata_vec = NULL)
-      out <- as.data.frame(res); out$term <- rownames(out); rownames(out) <- NULL
-      out <- out %>% rename(Df=Df, SumOfSqs=SumOfSqs, R2=R2, F=`F`, p=`Pr(>F)`) %>% select(term, Df, SumOfSqs, R2, F, p)
-      out$covars_used <- ""
-      write_csv(out, out_csv)
-      hc <- count_hc(md_b$disease)
-      write_counts_csv(out_counts_csv, site_name, nrow(md_b), hc["h"], hc["c"], "no_covariates")
+    usable <- c()
+    for (v in intersect(COV_CANDS, names(md_b))) {
+      vv <- md_b[[v]]
+      if (sum(!is.na(vv)) >= 3 && dplyr::n_distinct(vv, na.rm=TRUE) >= 2) usable <- c(usable, v)
     }
+    rhs <- paste(c("disease", usable), collapse = " + ")
+    fml <- stats::as.formula(paste("Db ~", rhs))
+    res <- vegan::adonis2(fml, data = md_b, permutations = permutations, by = "margin")
+    out <- as.data.frame(res); out$term <- rownames(out); rownames(out) <- NULL
+    out <- out %>% rename(Df=Df, SumOfSqs=SumOfSqs, R2=R2, F=`F`, p=`Pr(>F)`) %>% select(term, Df, SumOfSqs, R2, F, p)
+    write_csv(out, out_csv)
+    hc <- count_hc(md_b$disease); write_counts_csv(out_counts_csv, site_name, nrow(md_b), hc["h"], hc["c"], paste0("covars: ", paste(usable, collapse=", ")))
   }
 
-  # Bray — with_cov & nocov
-  run_permanova_site(OC, OH, "oral",  with_cov = FALSE, method = "bray",
-                     out_csv = file.path(outdir, "permanova_oral_bray_nocov.csv"),
-                     out_counts_csv = file.path(outdir, "permanova_oral_bray_nocov_counts.csv"))
-  run_permanova_site(FC, FH, "fecal", with_cov = FALSE, method = "bray",
-                     out_csv = file.path(outdir, "permanova_fecal_bray_nocov.csv"),
-                     out_counts_csv = file.path(outdir, "permanova_fecal_bray_nocov_counts.csv"))
-  run_permanova_site(OC, OH, "oral",  with_cov = TRUE,  method = "bray",
-                     out_csv = file.path(outdir, "permanova_oral_bray_with_cov.csv"),
-                     out_counts_csv = file.path(outdir, "permanova_oral_bray_with_cov_counts.csv"))
-  run_permanova_site(FC, FH, "fecal", with_cov = TRUE,  method = "bray",
-                     out_csv = file.path(outdir, "permanova_fecal_bray_with_cov.csv"),
-                     out_counts_csv = file.path(outdir, "permanova_fecal_bray_with_cov_counts.csv"))
+  permanova_nocov <- function(M_case, M_ctrl, site_name, covars, out_csv, out_counts_csv, permutations=999) {
+    if (is.null(M_case) || is.null(M_ctrl)) { write_note_csv(out_csv, "no_matrix"); write_counts_csv(out_counts_csv, site_name, 0,0,0,"no_matrix"); return(invisible(NULL)) }
+    lst <- align_features(list(M_case, M_ctrl))
+    if (length(lst) < 2) { write_note_csv(out_csv, "no_common_features"); write_counts_csv(out_counts_csv, site_name,0,0,0,"no_common_features"); return(invisible(NULL)) }
 
-  # Aitchison — with_cov & nocov (sensitivity)
-  run_permanova_site(OC, OH, "oral",  with_cov = FALSE, method = "aitchison",
-                     out_csv = file.path(outdir, "permanova_oral_aitchison_nocov.csv"),
-                     out_counts_csv = file.path(outdir, "permanova_oral_aitchison_nocov_counts.csv"))
-  run_permanova_site(FC, FH, "fecal", with_cov = FALSE, method = "aitchison",
-                     out_csv = file.path(outdir, "permanova_fecal_aitchison_nocov.csv"),
-                     out_counts_csv = file.path(outdir, "permanova_fecal_aitchison_nocov_counts.csv"))
-  run_permanova_site(OC, OH, "oral",  with_cov = TRUE,  method = "aitchison",
-                     out_csv = file.path(outdir, "permanova_oral_aitchison_with_cov.csv"),
-                     out_counts_csv = file.path(outdir, "permanova_oral_aitchison_with_cov_counts.csv"))
-  run_permanova_site(FC, FH, "fecal", with_cov = TRUE,  method = "aitchison",
-                     out_csv = file.path(outdir, "permanova_fecal_aitchison_with_cov.csv"),
-                     out_counts_csv = file.path(outdir, "permanova_fecal_aitchison_with_cov_counts.csv"))
+    M <- cbind(lst[[1]], lst[[2]]); labs <- colnames(M)
+    md <- covars %>% dplyr::filter(tolower(site) == tolower(site_name), Sample_ID %in% labs)
 
-  # -------- Disease * site interaction (Bray & Aitchison) with minimal covariates --------
-  permanova_interaction <- function(M_oral, M_fecal, method = c("bray","aitchison"),
-                                    covars, out_csv, out_counts_csv) {
-    method <- match.arg(method)
+    if (nrow(md) < 3 || dplyr::n_distinct(md$disease) < 2) {
+      md <- build_fallback_md(lst, labs, site_name)
+    }
+    if (nrow(md) < 3 || dplyr::n_distinct(md$disease) < 2) {
+      write_note_csv(out_csv, "insufficient_md")
+      hc <- count_hc(md$disease); write_counts_csv(out_counts_csv, site_name, nrow(md), hc["h"], hc["c"], "insufficient_md")
+      return(invisible(NULL))
+    }
+
+    Mb <- drop_bad_for_dist(M[, md$Sample_ID, drop=FALSE], "bray")
+    Db <- mk_dist(Mb, "bray")$D
+    if (is.null(Db)) { write_note_csv(out_csv,"dist_null"); write_counts_csv(out_counts_csv, site_name, nrow(md), NA, NA, "dist_null"); return(invisible(NULL)) }
+
+    labs_b <- labels(Db); md_b <- md[match(labs_b, md$Sample_ID), , drop = FALSE]
+    res <- vegan::adonis2(Db ~ disease, data = md_b, permutations = permutations, by = "margin")
+    out <- as.data.frame(res); out$term <- rownames(out); rownames(out) <- NULL
+    out <- out %>% dplyr::rename(Df=Df, SumOfSqs=SumOfSqs, R2=R2, F=`F`, p=`Pr(>F)`) %>% dplyr::select(term, Df, SumOfSqs, R2, F, p)
+    readr::write_csv(out, out_csv)
+    hc <- count_hc(md_b$disease); write_counts_csv(out_counts_csv, site_name, nrow(md_b), hc["h"], hc["c"], "no_covariates")
+  }
+
+  # with covariates
+  permanova_with_cov(OC, OH, "oral",  covars,
+                     file.path(outdir, "permanova_oral_bray_with_cov.csv"),
+                     file.path(outdir, "permanova_oral_bray_with_cov_counts.csv"),
+                     permutations = nperm)
+  permanova_with_cov(FC, FH, "fecal", covars,
+                     file.path(outdir, "permanova_fecal_bray_with_cov.csv"),
+                     file.path(outdir, "permanova_fecal_bray_with_cov_counts.csv"),
+                     permutations = nperm)
+  # no covariates
+  permanova_nocov(OC, OH, "oral",  covars,
+                  file.path(outdir, "permanova_oral_bray_nocov.csv"),
+                  file.path(outdir, "permanova_oral_bray_nocov_counts.csv"),
+                  permutations = nperm)
+  permanova_nocov(FC, FH, "fecal", covars,
+                  file.path(outdir, "permanova_fecal_bray_nocov.csv"),
+                  file.path(outdir, "permanova_fecal_bray_nocov_counts.csv"),
+                  permutations = nperm)
+
+  # -------- PERMANOVA interaction (disease * site) WITH covariates ------
+  permanova_interaction_bray <- function(M_oral, M_fecal, covars, out_csv, out_counts_csv, permutations=999) {
     if (is.null(M_oral) || is.null(M_fecal)) { write_note_csv(out_csv, "no_matrix"); write_counts_csv(out_counts_csv,"both",0,0,0,"no_matrix"); return(invisible(NULL)) }
     lst <- align_features(list(M_oral, M_fecal))
     if (length(lst) < 2) { write_note_csv(out_csv, "no_common_features"); write_counts_csv(out_counts_csv,"both",0,0,0,"no_common_features"); return(invisible(NULL)) }
@@ -521,45 +514,32 @@ main <- function() {
       hc <- count_hc(md$disease); write_counts_csv(out_counts_csv,"both", nrow(md), hc["h"], hc["c"], "insufficient_md")
       return(invisible(NULL))
     }
+    Mb <- drop_bad_for_dist(M[, md$Sample_ID, drop=FALSE], "bray")
+    Db <- mk_dist(Mb, "bray")$D
+    if (is.null(Db)) { write_note_csv(out_csv,"dist_null"); write_counts_csv(out_counts_csv,"both", nrow(md), NA, NA, "dist_null"); return(invisible(NULL)) }
 
-    # distance
-    if (method == "bray") {
-      Mb <- drop_bad_for_dist(M[, md$Sample_ID, drop=FALSE], "bray")
-      Dx <- mk_dist(Mb, "bray")$D
-    } else {
-      Mb <- M[, md$Sample_ID, drop=FALSE]
-      Dx <- mk_aitchison(Mb, pseudo)$D
+    labs_b <- labels(Db); md_b <- md[match(labs_b, md$Sample_ID), , drop = FALSE]
+
+    usable <- c()
+    for (v in intersect(COV_CANDS, names(md_b))) {
+      vv <- md_b[[v]]
+      if (sum(!is.na(vv)) >= 3 && dplyr::n_distinct(vv, na.rm=TRUE) >= 2) usable <- c(usable, v)
     }
-    if (is.null(Dx)) { write_note_csv(out_csv,"dist_null"); write_counts_csv(out_counts_csv,"both", nrow(md), NA, NA, "dist_null"); return(invisible(NULL)) }
-
-    labs_b <- labels(Dx); md_b <- md[match(labs_b, md$Sample_ID), , drop = FALSE]
-    usable <- select_minimal_covars(md_b)
-    md_b   <- scale_continuous_if_used(md_b, usable)
-    rhs    <- paste(c("disease * site", usable), collapse = " + ")
-    fml    <- stats::as.formula(paste("Dx ~", rhs))
-
-    # Use strata/blocks if STUDY_ID available (per-user request)
-    res <- adonis2_with_optional_strata(Dx, fml, md_b, nperm,
-                                        strata_vec = if ("STUDY_ID" %in% names(md_b)) md_b$STUDY_ID else NULL)
-
+    rhs <- paste(c("disease * site", usable), collapse = " + ")
+    fml <- stats::as.formula(paste("Db ~", rhs))
+    res <- vegan::adonis2(fml, data = md_b, permutations = permutations, by = "margin")
     out <- as.data.frame(res); out$term <- rownames(out); rownames(out) <- NULL
     out <- out %>% rename(Df=Df, SumOfSqs=SumOfSqs, R2=R2, F=`F`, p=`Pr(>F)`) %>% select(term, Df, SumOfSqs, R2, F, p)
-    out$covars_used <- paste(usable, collapse = ", ")
     write_csv(out, out_csv)
-
-    hc <- count_hc(md_b$disease)
-    write_counts_csv(out_counts_csv,"both", nrow(md_b), hc["h"], hc["c"],
-                     if (length(usable)) paste0("covars: ", paste(usable, collapse=", ")) else "covars: none")
+    hc <- count_hc(md_b$disease); write_counts_csv(out_counts_csv,"both", nrow(md_b), hc["h"], hc["c"], paste0("covars: ", paste(usable, collapse=", ")))
   }
 
-  permanova_interaction(cbind(OC, OH), cbind(FC, FH), method = "bray",
-                        covars, file.path(outdir, "permanova_interaction_bray.csv"),
-                        file.path(outdir, "permanova_interaction_bray_counts.csv"))
-  permanova_interaction(cbind(OC, OH), cbind(FC, FH), method = "aitchison",
-                        covars, file.path(outdir, "permanova_interaction_aitchison.csv"),
-                        file.path(outdir, "permanova_interaction_aitchison_counts.csv"))
+  permanova_interaction_bray(cbind(OC, OH), cbind(FC, FH), covars,
+                             file.path(outdir, "permanova_interaction_bray.csv"),
+                             file.path(outdir, "permanova_interaction_bray_counts.csv"),
+                             permutations = nperm)
 
-  # ------------------------------ PERMDISP (Bray) ------------------------------
+  # ------------------------------ PERMDISP -------------------------------
   permdisp_bray <- function(M_case, M_ctrl, covars, site_name, out_csv, out_counts_csv) {
     if (is.null(M_case) || is.null(M_ctrl)) { write_note_csv(out_csv, "no_matrix"); write_counts_csv(out_counts_csv, site_name,0,0,0,"no_matrix"); return(invisible(NULL)) }
     lst <- align_features(list(M_case, M_ctrl))
@@ -567,10 +547,13 @@ main <- function() {
     M <- cbind(lst[[1]], lst[[2]]); labs <- colnames(M)
 
     md <- covars %>% filter(tolower(site) == tolower(site_name), Sample_ID %in% labs)
-    if (nrow(md) < 3 || dplyr::n_distinct(md$disease) < 2) md <- build_fallback_md(lst, labs, site_name)
     if (nrow(md) < 3 || dplyr::n_distinct(md$disease) < 2) {
-      write_note_csv(out_csv, "insufficient_md"); hc <- count_hc(md$disease)
-      write_counts_csv(out_counts_csv, site_name, nrow(md), hc["h"], hc["c"], "insufficient_md"); return(invisible(NULL))
+      md <- build_fallback_md(lst, labs, site_name)
+    }
+    if (nrow(md) < 3 || dplyr::n_distinct(md$disease) < 2) {
+      write_note_csv(out_csv, "insufficient_md")
+      hc <- count_hc(md$disease); write_counts_csv(out_counts_csv, site_name, nrow(md), hc["h"], hc["c"], "insufficient_md")
+      return(invisible(NULL))
     }
 
     Mb <- drop_bad_for_dist(M[, md$Sample_ID, drop=FALSE], "bray")
@@ -593,7 +576,7 @@ main <- function() {
                 file.path(outdir, "permdisp_fecal_bray.csv"),
                 file.path(outdir, "permdisp_fecal_bray_counts.csv"))
 
-  # --------------- Group distances (Bray & Jaccard) ---------------
+  # --------------- Group distance table (Bray & Jaccard) ----------------
   write_group_distance_csv <- function(M_all, group_map_named, out_csv) {
     if (is.null(M_all) || ncol(M_all) < 4) { write_note_csv(out_csv, "too_few_samples"); return(invisible(NULL)) }
     dist_one <- function(method) {
@@ -617,7 +600,7 @@ main <- function() {
   }
   write_group_distance_csv(M_all, group_map_named, file.path(outdir, "beta_group_distances.csv"))
 
-  # -------- Paired distances summary (Crohn oral–fecal, Bray) --------
+  # ----------- Paired distances summary (Crohn oral–fecal) --------------
   if (!is.null(pairs_df) && nrow(pairs_df) > 0) {
     lst <- align_features(list(OC, FC)); if (length(lst) == 2) {
       OC2 <- lst[[1]]; FC2 <- lst[[2]]

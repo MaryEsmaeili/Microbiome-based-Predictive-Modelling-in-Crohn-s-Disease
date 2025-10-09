@@ -1,260 +1,190 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-metatablepool.py
-
-Build a pooled, long-format meta table for modeling (no Snakemake needed).
-
-Key points you asked for:
-- site is numeric: oral=0, fecal=1  (no text labels anywhere)
-- Preserve leading zeros and original case of Sample_ID (no uppercasing, no lstrip)
-- Remove replicate suffix like ".1" from Sample_ID (configurable)
-- Strong NA cleaning; drop any row missing required covariates
-- Outputs:
-    data/meta/model_table_pooled.csv
-    data/meta/model_table_pooled_missing.csv
-- Helper functions (normalize_sample_id, clean_na_like, etc.) are reusable across scripts.
-
-Run:
-    python metatablepool.py
-"""
-
 from __future__ import annotations
+import argparse, json, re
 from pathlib import Path
-from typing import List, Tuple
+import numpy as np
 import pandas as pd
 
-# ============================= CONFIG =============================
-
-# Inputs (hard-coded as requested)
-CROHN_CSV     = Path("data/meta/crohn_metadata.csv")
-HEALTHY_CSV        = Path("data/meta/healthy_metadata.csv")
-
-# Outputs
-OUT_POOLED_CSV   = Path("data/meta/model_table_pooled.csv")
-OUT_MISSING_CSV  = Path("data/meta/model_table_pooled_missing.csv")
-
-# Keep ".1" replicate suffix?  (Set True if your abundance headers use them)
-KEEP_DOT_SUFFIX  = False
-
-# Numeric coding for site
-ORAL_CODE  = 0
-FECAL_CODE = 1
-
-# Required covariates (any missing → row dropped)
-REQ_COVARS: List[str] = [
-    "Age", "Sex", "BMI", "Smoking",
-    "Antibiotics_3m", "PPI_use",
-    "Steroids_ongoing", "Immuno_ongoing"
+# ---------- columns ----------
+CORE = [
+    "Age","Sex","BMI","Smoking","Antibiotics_3m",
+    "PPI_use","Steroids_ongoing","Immuno_ongoing"
 ]
-
-# Final column order (site is numeric)
-TARGET_COLS: List[str] = [
-    "Sample_ID", "STUDY_ID", "site", "disease",
-    "Age", "Sex", "BMI", "Smoking",
-    "Antibiotics_3m", "PPI_use", "Steroids_ongoing", "Immuno_ongoing"
+# Crohn-only: فقط RAW و فیلدهای بالینی که گفتی
+CROHN_ONLY_BASE = [
+    "Calprotectin_baseline_raw", "HBI_baseline_raw",
+    "Disease_duration_years","Perianal_disease","Any_resection",
+    "Anti_TNF_current","5ASA_current",
 ]
+MONTREAL_COLS = ["Montreal_behavior","Montreal_L4"]
 
-# Integer-coded columns (nullable Int64). BMI is float.
-CAT_INT_COLS: List[str] = [
-    "disease", "Sex", "Smoking",
-    "Antibiotics_3m", "PPI_use",
-    "Steroids_ongoing", "Immuno_ongoing", "site"
-]
+NA_SYMS = {"", "na", "n/a", "none", "null", "nan", "NaN", "NAN"}
 
-# NA-like strings to coerce
-NA_STRINGS = {"", "NA", "NaN", "NAN", "NULL", "Null", "null", "None", "none"}
+# ---------- helpers ----------
+def norm_sample_id(x: str) -> str:
+    s = str(x).strip()
+    s = re.sub(r"\.\d+$", "", s)  # drop .rep suffix
+    if s.isdigit():
+        try: s = str(int(s))      # strip leading zeros on numeric-only
+        except: pass
+    return s.upper()
 
-# ====================== REUSABLE HELPERS (copy-paste friendly) ======================
+def to_int01(x):
+    """map yes/no, y/n, true/false, 1/0 -> {0,1,NA} (nullable Int64)"""
+    if x is None or (isinstance(x, float) and np.isnan(x)): return pd.NA
+    s = str(x).strip().lower()
+    if s in NA_SYMS: return pd.NA
+    if s in {"1","true","t","yes","y"}: return 1
+    if s in {"0","false","f","no","n"}: return 0
+    try:
+        v = float(s)
+        if np.isnan(v): return pd.NA
+        return int(v)
+    except:
+        return pd.NA
 
-def read_csv_obj(path: Path) -> pd.DataFrame:
-    """Read CSV as object dtype (robust) and fail if not found."""
-    if not path.exists():
-        raise FileNotFoundError(f"Input file not found: {path}")
-    return pd.read_csv(path, dtype="object")
+def sex_to_int01(x):
+    if x is None or (isinstance(x, float) and np.isnan(x)): return pd.NA
+    s = str(x).strip().lower()
+    if s in {"f","female","0"}: return 0
+    if s in {"m","male","1"}:   return 1
+    try:
+        v = float(s)
+        if np.isnan(v): return pd.NA
+        return int(v)
+    except:
+        return pd.NA
 
-def clean_na_like(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
-    """Convert common NA-like strings to real <NA>."""
-    upper_na = {x.upper() for x in NA_STRINGS}
-    for c in cols:
-        if c in df.columns:
-            s = df[c].astype("string").str.strip()
-            df[c] = s.where(~s.str.upper().isin(upper_na), pd.NA)
-    return df
+def map_montreal_behavior(x):
+    if x is None or (isinstance(x, float) and np.isnan(x)): return pd.NA
+    s = str(x).strip().upper()
+    if s in {"B1","1"}: return 1
+    if s in {"B2","2"}: return 2
+    if s in {"B3","3"}: return 3
+    return pd.NA
 
-def normalize_sample_id_series(s: pd.Series, keep_dot_suffix: bool = False) -> pd.Series:
-    """
-    Normalize Sample_ID safely for merging with abundance matrices:
-    - strip spaces
-    - optionally drop replicate suffix '.<digits>' (default: drop)
-    - DO NOT uppercase; DO NOT strip leading zeros
-    """
-    s = s.astype("string").str.strip()
-    if not keep_dot_suffix:
-        s = s.str.replace(r"\.\d+$", "", regex=True)
-    return s
+def expand_subject_to_samples(df_subject: pd.DataFrame, disease_flag: int,
+                              crohn_only_cols: list[str]) -> pd.DataFrame:
+    """از ردیفِ فردی، سطر-نمونه بساز (oral/fecal اگر ID دارد)."""
+    rows = []
+    for _, r in df_subject.iterrows():
+        base = {}
+        # core
+        for c in CORE:
+            base[c] = r.get(c, pd.NA)
+        # crohn-only فقط برای disease=1
+        for c in crohn_only_cols:
+            base[c] = r.get(c, pd.NA) if disease_flag == 1 else pd.NA
 
-def as_int64(s: pd.Series) -> pd.Series:
-    """Coerce to pandas nullable Int64 (keeps <NA>)."""
-    return pd.to_numeric(s, errors="coerce").astype("Int64")
+        # ORAL
+        o = str(r.get("Oral_sample_ID","")).strip()
+        if o and o.lower() not in NA_SYMS:
+            rows.append({
+                "Sample_ID": norm_sample_id(o),
+                "site": "oral",
+                "site_bin": 0,                # oral -> 0
+                "disease": int(disease_flag), # 0/1 int
+                **base
+            })
+        # FECAL
+        f = str(r.get("Fecal_sample_ID","")).strip()
+        if f and f.lower() not in NA_SYMS:
+            rows.append({
+                "Sample_ID": norm_sample_id(f),
+                "site": "fecal",
+                "site_bin": 1,                # fecal -> 1
+                "disease": int(disease_flag),
+                **base
+            })
+    return pd.DataFrame(rows)
 
-def as_float64(s: pd.Series) -> pd.Series:
-    """Coerce to float64 (keeps NaN)."""
-    return pd.to_numeric(s, errors="coerce").astype("float64")
+# ---------- main ----------
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--healthy", required=True, help="data/meta/healthy_metadata.csv")
+    ap.add_argument("--crohn",   required=True, help="data/meta/crohn_metadata.csv")
+    ap.add_argument("--out",     required=True, help="data/meta/model_table_pooled.csv")
+    ap.add_argument("--report",  required=False, help="results/meta_table_pooled.json")
+    ap.add_argument("--include-montreal", action="store_true",
+                    help="Add Montreal_behavior (1/2/3) and Montreal_L4 (0/1) for Crohn-only.")
+    args = ap.parse_args()
 
-def ensure_unique_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Ensure unique column names (keep the right-most duplicate)."""
-    if df.columns.duplicated().any():
-        df = df.loc[:, ~df.columns.duplicated(keep="last")]
-    return df
+    # read (as string, then clean)
+    H = pd.read_csv(args.healthy, dtype=str).replace(NA_SYMS, np.nan)
+    C = pd.read_csv(args.crohn,   dtype=str).replace(NA_SYMS, np.nan)
 
-def retype_and_order(df: pd.DataFrame) -> pd.DataFrame:
-    """Enforce final dtypes and column order."""
-    for col in TARGET_COLS:
-        if col not in df.columns:
-            df[col] = pd.NA
-    if "Age" in df: df["Age"] = as_int64(df["Age"])
-    if "BMI" in df: df["BMI"] = as_float64(df["BMI"])
-    for c in CAT_INT_COLS:
-        if c in df: df[c] = as_int64(df[c])
-    return df[TARGET_COLS].copy()
+    # ---- typing: core ----
+    for df in (H, C):
+        if "Age" in df: df["Age"] = pd.to_numeric(df["Age"], errors="coerce").round(1)
+        if "BMI" in df:
+            df["BMI"] = pd.to_numeric(df["BMI"], errors="coerce").round(1) 
+        if "Sex" in df: df["Sex"] = df["Sex"].map(sex_to_int01).astype("Int64")
+        for c in ["Smoking","Antibiotics_3m","PPI_use","Steroids_ongoing","Immuno_ongoing"]:
+            if c in df: df[c] = df[c].map(to_int01).astype("Int64")
 
-def require_and_drop(df: pd.DataFrame,
-                     required_cols: List[str],
-                     whoami: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Drop rows missing ANY required column; return (kept, dropped_report).
-    Report contains which columns were missing.
-    """
-    miss_mask = df[required_cols].isna().any(axis=1)
-    kept = df.loc[~miss_mask].copy()
-    dropped = df.loc[miss_mask].copy()
-    if len(dropped):
-        # Provide detailed missing list per-row
-        dropped["__missing_cols__"] = df[required_cols].apply(
-            lambda r: ",".join([c for c, v in r.items() if pd.isna(v)]), axis=1
-        )[miss_mask].values
-        dropped["__source__"] = whoami
-        dropped = dropped[["Sample_ID","STUDY_ID","site","disease","__source__","__missing_cols__"]]
-    return kept, dropped
+    # ---- typing: Crohn-only ----
+    for c in ["Calprotectin_baseline_raw","HBI_baseline_raw","Disease_duration_years"]:
+        if c in C: C[c] = pd.to_numeric(C[c], errors="coerce")
+    for c in ["Perianal_disease","Any_resection","Anti_TNF_current","5ASA_current"]:
+        if c in C: C[c] = C[c].map(to_int01).astype("Int64")
 
-# ============================== BUILDERS ==============================
+    # Montreal (optional)
+    crohn_only_cols = CROHN_ONLY_BASE.copy()
+    if args.include_montreal:
+        if "Montreal_behavior" in C: C["Montreal_behavior"] = C["Montreal_behavior"].map(map_montreal_behavior).astype("Int64")
+        if "Montreal_L4" in C:        C["Montreal_L4"]       = C["Montreal_L4"].map(to_int01).astype("Int64")
+        crohn_only_cols += [c for c in MONTREAL_COLS if c in C.columns]
 
-def build_crohn_long(core_df: pd.DataFrame) -> pd.DataFrame:
-    need = {"STUDY_ID","Oral_sample_ID","Fecal_sample_ID", *REQ_COVARS}
-    missing = sorted(list(need - set(core_df.columns)))
-    if missing:
-        raise KeyError(f"[Crohn] Missing required columns: {missing}")
+    # ---- expand to sample-level ----
+    h_samples = expand_subject_to_samples(H, disease_flag=0, crohn_only_cols=crohn_only_cols)
+    c_samples = expand_subject_to_samples(C, disease_flag=1, crohn_only_cols=crohn_only_cols)
 
-    df = core_df.copy()
-    df = clean_na_like(df, list(need))
+    pooled = pd.concat([h_samples, c_samples], ignore_index=True)
 
-    # Normalize ID-like columns (no case change, no leading-zero change)
-    for c in ["STUDY_ID","Oral_sample_ID","Fecal_sample_ID"]:
-        df[c] = normalize_sample_id_series(df[c], keep_dot_suffix=KEEP_DOT_SUFFIX)
+    # ---- final column order ----
+    final_cols = ["Sample_ID","site","site_bin","disease"] \
+                 + [c for c in CORE if c in pooled.columns] \
+                 + [c for c in crohn_only_cols if c in pooled.columns]
 
-    cov = df[["STUDY_ID", *REQ_COVARS]].copy()
+    pooled = (pooled[final_cols]
+              .drop_duplicates(subset=["Sample_ID","site"])
+              .sort_values(["site","disease","Sample_ID"])
+              .reset_index(drop=True))
 
-    # ORAL rows
-    oral = (
-        df[["STUDY_ID","Oral_sample_ID"]]
-        .rename(columns={"Oral_sample_ID":"Sample_ID"})
-        .assign(site=ORAL_CODE)
-        .merge(cov, on="STUDY_ID", how="left")
-    )
-    oral = oral[oral["Sample_ID"].notna()]
+    # enforce dtypes on outputs
+    pooled["disease"] = pooled["disease"].astype("Int64")
+    if "site_bin" in pooled: pooled["site_bin"] = pooled["site_bin"].astype("Int64")
+    for c in CORE:
+        if c in pooled and pooled[c].dtype.name == "object" and c != "Sex":
+            # leave non-binary core as is (e.g., Age float), binaries already cast
+            pass
 
-    # FECAL rows
-    fecal = (
-        df[["STUDY_ID","Fecal_sample_ID"]]
-        .rename(columns={"Fecal_sample_ID":"Sample_ID"})
-        .assign(site=FECAL_CODE)
-        .merge(cov, on="STUDY_ID", how="left")
-    )
-    fecal = fecal[fecal["Sample_ID"].notna()]
+    # ---- write ----
+    outp = Path(args.out); outp.parent.mkdir(parents=True, exist_ok=True)
+    pooled.to_csv(outp, index=False)
 
-    out = pd.concat([oral, fecal], ignore_index=True)
-    out["disease"] = 1  # Crohn
-    out["Sample_ID"] = normalize_sample_id_series(out["Sample_ID"], keep_dot_suffix=KEEP_DOT_SUFFIX)
-    out = ensure_unique_columns(out).drop_duplicates(subset=["Sample_ID","site"])
-    out = retype_and_order(out)
-    return out
+    # ---- report (optional) ----
+    if args.report:
+        rep = {
+            "rows_out": int(len(pooled)),
+            "unique_samples": int(pooled["Sample_ID"].nunique()),
+            "by_site": pooled["site"].value_counts(dropna=False).to_dict(),
+            "missing_core_share": {c: float(pooled[c].isna().mean()) for c in CORE if c in pooled.columns},
+            "crohn_only_kept": [c for c in crohn_only_cols if c in pooled.columns],
+            "dtypes": {c: str(pooled[c].dtype) for c in pooled.columns},
+        }
+        Path(args.report).parent.mkdir(parents=True, exist_ok=True)
+        with open(args.report, "w") as f: json.dump(rep, f, indent=2)
 
-
-def build_healthy_long(healthy_df: pd.DataFrame) -> pd.DataFrame:
-    need_min = {"STUDY_ID","Oral_sample_ID","Fecal_sample_ID",
-                "Age","Sex","BMI","Smoking","Antibiotics_3m","PPI_use","Steroids_ongoing"}
-    missing = sorted(list(need_min - set(healthy_df.columns)))
-    if missing:
-        raise KeyError(f"[Healthy] Missing required columns: {missing}")
-
-    df = healthy_df.copy()
-    df = clean_na_like(df, list(need_min))
-
-    for c in ["STUDY_ID","Oral_sample_ID","Fecal_sample_ID"]:
-        df[c] = normalize_sample_id_series(df[c], keep_dot_suffix=KEEP_DOT_SUFFIX)
-
-    cov = df[["STUDY_ID","Age","Sex","BMI","Smoking","Antibiotics_3m","PPI_use","Steroids_ongoing"]].copy()
-    cov["Immuno_ongoing"] = 0  # not collected for healthy
-
-    oral = (
-        df[["STUDY_ID","Oral_sample_ID"]]
-        .rename(columns={"Oral_sample_ID":"Sample_ID"})
-        .assign(site=ORAL_CODE)
-        .merge(cov, on="STUDY_ID", how="left")
-    )
-    oral = oral[oral["Sample_ID"].notna()]
-
-    fecal = (
-        df[["STUDY_ID","Fecal_sample_ID"]]
-        .rename(columns={"Fecal_sample_ID":"Sample_ID"})
-        .assign(site=FECAL_CODE)
-        .merge(cov, on="STUDY_ID", how="left")
-    )
-    fecal = fecal[fecal["Sample_ID"].notna()]
-
-    out = pd.concat([oral, fecal], ignore_index=True)
-    out["disease"] = 0  # Healthy
-    out["Sample_ID"] = normalize_sample_id_series(out["Sample_ID"], keep_dot_suffix=KEEP_DOT_SUFFIX)
-    out = ensure_unique_columns(out).drop_duplicates(subset=["Sample_ID","site"])
-    out = retype_and_order(out)
-    return out
-
-# ============================== MAIN ==============================
-
-def main() -> None:
-    crohn_core = read_csv_obj(CROHN_CSV)
-    # keep parity; not used for building
-    if CROHN_CSV.exists():
-        _ = read_csv_obj(CROHN_CSV)
-    healthy = read_csv_obj(HEALTHY_CSV)
-
-    crohn_long   = build_crohn_long(crohn_core)
-    healthy_long = build_healthy_long(healthy)
-
-    pooled = pd.concat([crohn_long, healthy_long], ignore_index=True)
-    pooled = retype_and_order(ensure_unique_columns(pooled))
-
-    # Strict requirement: Sample_ID, site, disease, and all covariates must exist
-    required_all = ["Sample_ID","site","disease", *REQ_COVARS]
-    kept, dropped = require_and_drop(pooled, required_all, whoami="pooled")
-
-    OUT_POOLED_CSV.parent.mkdir(parents=True, exist_ok=True)
-    kept.to_csv(OUT_POOLED_CSV, index=False)
-    dropped.to_csv(OUT_MISSING_CSV, index=False)
-
-    # Compact console summary
-    counts = (
-        kept.assign(disease=kept["disease"].map({0:"Healthy",1:"Crohn"}))
-            .pivot_table(index="site", columns="disease", values="Sample_ID",
-                         aggfunc="count", fill_value=0)
-            .rename(index={ORAL_CODE:"oral(0)", FECAL_CODE:"fecal(1)"})
-            .reset_index()
-    )
-    print(f"[OK] pooled rows kept: {len(kept)} (dropped: {len(dropped)})")
-    print("\nCounts by site(0/1) × disease")
-    print(counts.to_string(index=False))
-    print(f"\nWritten:\n  {OUT_POOLED_CSV}\n  {OUT_MISSING_CSV}")
+    print(f"[OK] wrote {args.out} (rows={len(pooled)})")
 
 if __name__ == "__main__":
     main()
+
+# python metatablepool.py \
+#   --crohn   data/meta/crohn_metadata.csv \
+#   --healthy data/meta/healthy_metadata.csv \
+#   --out     data/meta/model_table_pooled.csv \
+#   --report  results/meta_table_pooled.json \
+#   --include-montreal      # اگر خواستی مونترآل را هم اضافه کن؛ در غیر این صورت حذفش کن

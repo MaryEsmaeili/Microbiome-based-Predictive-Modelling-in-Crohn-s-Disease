@@ -1,0 +1,36 @@
+# Minimal, single source of truth for paths and knobs
+
+paths:
+  # main meta (pooled) with normalized Sample_IDs
+  meta_pooled: data/meta/model_table_pooled.csv
+  # matched oral–fecal pairs (Crohn); two ستون oral/fecal با هر اسمی باشد auto-detect می‌شود
+  pairs: data/processed/matched_sample_ids.csv
+
+  # abundance tables already filtered/normalized used by beta/taxa_compare (as you have)
+  oral_crohn:    data/filtered/oral_abund_crohn_filtered_normalized.csv
+  fecal_crohn:   data/filtered/fecal_abund_crohn_filtered_normalized.csv
+  oral_healthy:  data/filtered/oral_abund_healthy_filtered_normalized.csv
+  fecal_healthy: data/filtered/fecal_abund_healthy_filtered_normalized.csv
+
+  # colors (shared by R & Py)
+  colors: config/colors.yml
+
+# taxa compare parameters (affects selection & plots)
+taxa_compare:
+  topk: 15
+  presence_pct: 0.10
+  prevalence: 0.10
+
+# covariates to include in adjusted analyses
+covariates:
+  base: [Age, Sex, BMI, Smoking, Antibiotics_3m, PPI_use, Steroids_ongoing, Immuno_ongoing]
+  crohn_severity: [HBI_baseline_raw, Calprotectin_baseline_raw]
+
+# ranks to produce
+ranks: [genus, species]
+
+# ML defaults
+ml:
+  seed: 42
+  kfolds: 5
+  models: [logreg, l1, rf]   # used inside your ml_cv.py
