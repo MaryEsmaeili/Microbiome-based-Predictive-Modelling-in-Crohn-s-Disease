@@ -11,9 +11,8 @@ CORE = [
     "Age","Sex","BMI","Smoking","Antibiotics_3m",
     "PPI_use","Steroids_ongoing","Immuno_ongoing"
 ]
-# Crohn-only: فقط RAW و فیلدهای بالینی که گفتی
 CROHN_ONLY_BASE = [
-    "Calprotectin_baseline_raw", "HBI_baseline_raw",
+    "Calprotectin_baseline_raw","HBI_baseline_raw",
     "Disease_duration_years","Perianal_disease","Any_resection",
     "Anti_TNF_current","5ASA_current",
 ]
@@ -23,15 +22,20 @@ NA_SYMS = {"", "na", "n/a", "none", "null", "nan", "NaN", "NAN"}
 
 # ---------- helpers ----------
 def norm_sample_id(x: str) -> str:
+    """
+    Normalize Sample_ID without stripping leading zeros:
+    - remove trailing '.rep' or '.<number>' if present
+    - uppercase
+    - no numeric casting
+    """
     s = str(x).strip()
-    s = re.sub(r"\.\d+$", "", s)  # drop .rep suffix
-    if s.isdigit():
-        try: s = str(int(s))      # strip leading zeros on numeric-only
-        except: pass
+    s = re.sub(r"\.(?:rep|[0-9]+)$", "", s, flags=re.IGNORECASE)
+    if re.match(r"^[A-Za-z]\d+$", s):
+        s = s[0].upper() + s[1:]
     return s.upper()
 
 def to_int01(x):
-    """map yes/no, y/n, true/false, 1/0 -> {0,1,NA} (nullable Int64)"""
+    """Map yes/no/true/false/1/0 to {0,1,NA} (nullable Int64)."""
     if x is None or (isinstance(x, float) and np.isnan(x)): return pd.NA
     s = str(x).strip().lower()
     if s in NA_SYMS: return pd.NA
@@ -66,34 +70,30 @@ def map_montreal_behavior(x):
 
 def expand_subject_to_samples(df_subject: pd.DataFrame, disease_flag: int,
                               crohn_only_cols: list[str]) -> pd.DataFrame:
-    """از ردیفِ فردی، سطر-نمونه بساز (oral/fecal اگر ID دارد)."""
+    """
+    Expand subject-level rows to sample-level (oral/fecal) rows when IDs exist.
+    """
     rows = []
     for _, r in df_subject.iterrows():
-        base = {}
-        # core
-        for c in CORE:
-            base[c] = r.get(c, pd.NA)
-        # crohn-only فقط برای disease=1
+        base = {c: r.get(c, pd.NA) for c in CORE}
         for c in crohn_only_cols:
             base[c] = r.get(c, pd.NA) if disease_flag == 1 else pd.NA
 
-        # ORAL
         o = str(r.get("Oral_sample_ID","")).strip()
         if o and o.lower() not in NA_SYMS:
             rows.append({
                 "Sample_ID": norm_sample_id(o),
                 "site": "oral",
-                "site_bin": 0,                # oral -> 0
-                "disease": int(disease_flag), # 0/1 int
+                "site_bin": 0,
+                "disease": int(disease_flag),
                 **base
             })
-        # FECAL
         f = str(r.get("Fecal_sample_ID","")).strip()
         if f and f.lower() not in NA_SYMS:
             rows.append({
                 "Sample_ID": norm_sample_id(f),
                 "site": "fecal",
-                "site_bin": 1,                # fecal -> 1
+                "site_bin": 1,
                 "disease": int(disease_flag),
                 **base
             })
@@ -110,39 +110,37 @@ def main():
                     help="Add Montreal_behavior (1/2/3) and Montreal_L4 (0/1) for Crohn-only.")
     args = ap.parse_args()
 
-    # read (as string, then clean)
+    # read as string then cast
     H = pd.read_csv(args.healthy, dtype=str).replace(NA_SYMS, np.nan)
     C = pd.read_csv(args.crohn,   dtype=str).replace(NA_SYMS, np.nan)
 
-    # ---- typing: core ----
+    # core typing
     for df in (H, C):
         if "Age" in df: df["Age"] = pd.to_numeric(df["Age"], errors="coerce").round(1)
-        if "BMI" in df:
-            df["BMI"] = pd.to_numeric(df["BMI"], errors="coerce").round(1) 
+        if "BMI" in df: df["BMI"] = pd.to_numeric(df["BMI"], errors="coerce").round(1)
         if "Sex" in df: df["Sex"] = df["Sex"].map(sex_to_int01).astype("Int64")
         for c in ["Smoking","Antibiotics_3m","PPI_use","Steroids_ongoing","Immuno_ongoing"]:
             if c in df: df[c] = df[c].map(to_int01).astype("Int64")
 
-    # ---- typing: Crohn-only ----
+    # crohn-only typing
     for c in ["Calprotectin_baseline_raw","HBI_baseline_raw","Disease_duration_years"]:
         if c in C: C[c] = pd.to_numeric(C[c], errors="coerce")
     for c in ["Perianal_disease","Any_resection","Anti_TNF_current","5ASA_current"]:
         if c in C: C[c] = C[c].map(to_int01).astype("Int64")
 
-    # Montreal (optional)
     crohn_only_cols = CROHN_ONLY_BASE.copy()
     if args.include_montreal:
         if "Montreal_behavior" in C: C["Montreal_behavior"] = C["Montreal_behavior"].map(map_montreal_behavior).astype("Int64")
         if "Montreal_L4" in C:        C["Montreal_L4"]       = C["Montreal_L4"].map(to_int01).astype("Int64")
         crohn_only_cols += [c for c in MONTREAL_COLS if c in C.columns]
 
-    # ---- expand to sample-level ----
+    # expand to sample rows
     h_samples = expand_subject_to_samples(H, disease_flag=0, crohn_only_cols=crohn_only_cols)
     c_samples = expand_subject_to_samples(C, disease_flag=1, crohn_only_cols=crohn_only_cols)
 
     pooled = pd.concat([h_samples, c_samples], ignore_index=True)
 
-    # ---- final column order ----
+    # final column order
     final_cols = ["Sample_ID","site","site_bin","disease"] \
                  + [c for c in CORE if c in pooled.columns] \
                  + [c for c in crohn_only_cols if c in pooled.columns]
@@ -152,19 +150,15 @@ def main():
               .sort_values(["site","disease","Sample_ID"])
               .reset_index(drop=True))
 
-    # enforce dtypes on outputs
+    # dtypes
     pooled["disease"] = pooled["disease"].astype("Int64")
     if "site_bin" in pooled: pooled["site_bin"] = pooled["site_bin"].astype("Int64")
-    for c in CORE:
-        if c in pooled and pooled[c].dtype.name == "object" and c != "Sex":
-            # leave non-binary core as is (e.g., Age float), binaries already cast
-            pass
 
-    # ---- write ----
+    # write
     outp = Path(args.out); outp.parent.mkdir(parents=True, exist_ok=True)
     pooled.to_csv(outp, index=False)
 
-    # ---- report (optional) ----
+    # optional report
     if args.report:
         rep = {
             "rows_out": int(len(pooled)),
@@ -181,6 +175,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 # python metatablepool.py \
 #   --crohn   data/meta/crohn_metadata.csv \

@@ -1,30 +1,48 @@
 #############################################
 # Snakefile — end-to-end microbiome pipeline
-# Stages: preprocessing → filtering → alpha/beta → taxa_compare
-#         → DA_with_covariates → deltas → PPI interactions
-#         → QC targeted → ML features
+# Clean QC, optional PCA/PERMANOVA, ML without pre-built features
 #############################################
 
 import os
 
-# ========= Global =========
+# ---------------- Basic setup ----------------
 SCRIPTS_DIR = "scripts"
-LEVELS      = ["genus", "species"]
 
-# ========= Raw inputs =========
+# Config helper: read from config.yaml if present, else fallback defaults
+def cfg(key, default):
+    return config.get(key, default) if "config" in globals() else default
+
+# Levels (taxonomic rank) & sites (kept for possible helpers)
+LEVELS = cfg("levels", ["genus", "species"])
+if isinstance(LEVELS, str):
+    LEVELS = [LEVELS]
+SITES = ["oral", "fecal"]  # canonical helper
+
+def site_cap(s):  # not used everywhere, but handy to keep
+    return s.capitalize()
+
+# Volcano defaults (shared by DA & PPI)
+VOLCANO_METRIC = cfg("volcano_metric", "q")  # "q" or "p"
+VOLCANO_ALPHA  = cfg("volcano_alpha",  0.10)
+HEAT_TOPK      = cfg("heat_topk",      10)
+
+# QC extras
+RUN_PCA_PERMANOVA = cfg("run_pca_permanova", True)
+
+# ---------------- Raw inputs ----------------
 META_XLSX         = "data/Metadata_metagenomics.xlsx"
 CROHN_MERGED_TSV  = "data/utrecht_metaphlan_merged.txt"
 HEALTHY_ORAL_TSV  = "data/oral_only_results_metaphlan4.txt"
 HEALTHY_FECAL_TSV = "data/fecal_only_results_metaphlan4.txt"
 
-# ========= Preprocessing outputs =========
+# ---------------- Preprocessing outputs ----------------
 ORAL_CROHN_OUT     = "data/processed/oral_abund_crohn.csv"
 FECAL_CROHN_OUT    = "data/processed/fecal_abund_crohn.csv"
 ORAL_HEALTHY_OUT   = "data/processed/oral_abund_healthy.csv"
 FECAL_HEALTHY_OUT  = "data/processed/fecal_abund_healthy.csv"
 MATCHED_IDS_OUT    = "data/processed/matched_sample_ids.csv"
 
-# ========= Filtering outputs =========
+# ---------------- Filtering outputs ----------------
 ORAL_NORM_OUT          = "data/filtered/oral_abund_crohn_filtered_normalized.csv"
 FECAL_NORM_OUT         = "data/filtered/fecal_abund_crohn_filtered_normalized.csv"
 ORAL_HEALTHY_NORM_OUT  = "data/filtered/oral_abund_healthy_filtered_normalized.csv"
@@ -40,16 +58,16 @@ RANK_FECAL_PNG         = "results/filtering/rank_abundance_fecal_combined.png"
 PREV_ORAL_PNG          = "results/filtering/prevalence_mean_scatter_oral_combined.png"
 PREV_FECAL_PNG         = "results/filtering/prevalence_mean_scatter_fecal_combined.png"
 
-# ========= Covariates / colors =========
+# ---------------- Covariates / colors ----------------
 MODEL_TABLE_POOLED = "data/meta/model_table_pooled.csv"
 CONFIG_COLORS_YAML = "config/colors.yml"
 
-# ========= Taxa-compare (per-rank) =========
+# ---------------- Taxa-compare (per-rank) ----------------
 TAXA_OUTDIR = "results/taxa_compare"
 TAXA_TOPK   = 15
 _TAXA_FILES = [
     # tables
-    "group_means_{rank}.csv","group_deltas_{rank}.csv",
+    "group_means_{rank}.csv", "group_deltas_{rank}.csv",
     "pct_oral_crohn.csv","pct_oral_healthy.csv","pct_fecal_crohn.csv","pct_fecal_healthy.csv","pct_all.csv",
     # plots
     "heatmap_group_means_{rank}.png","heatmap_group_deltas_{rank}.png",
@@ -63,44 +81,101 @@ TAXA_CORE_OUTPUTS = [
     for rank in LEVELS for fn in _TAXA_FILES
 ]
 
-# ========= DA (per-rank) =========
+# ---------------- DA (per-rank) ----------------
 DA_OUTDIR = "results/da_models"
 _DA_FILES = [
-    "da_oral_unadj_{rank}.csv","da_fecal_unadj_{rank}.csv","da_paired_{rank}.csv",
+    # tables
+    "da_oral_unadj_{rank}.csv","da_fecal_unadj_{rank}.csv",
     "da_all_adj_{rank}.csv","da_oral_adj_{rank}.csv","da_fecal_adj_{rank}.csv",
+    "da_paired_{rank}.csv",
+    "da_simple_oral_{rank}.csv","da_simple_fecal_{rank}.csv",
+    # plots
     "volcano_oral_unadj_{rank}.png","volcano_fecal_unadj_{rank}.png",
     "volcano_all_adj_{rank}.png","volcano_oral_adj_{rank}.png","volcano_fecal_adj_{rank}.png",
+    "volcano_paired_{rank}.png"
 ]
-DA_OUTPUTS = [f"{DA_OUTDIR}/{r}/" + p.format(rank=r) for r in LEVELS for p in _DA_FILES]
+# For rule outputs (with {level} wildcard):
+DA_FILES_TEMPL = [f"{DA_OUTDIR}/{{level}}/" + p.replace("{rank}", "{level}") for p in _DA_FILES]
+# For “all” aggregation (materialized list):
+DA_OUTPUTS     = [f"{DA_OUTDIR}/{r}/" + p.format(rank=r) for r in LEVELS for p in _DA_FILES]
 
-# ========= PPI (per-rank) =========
-PPI_OUTDIR = "results/ppi_interactions"
-_PPI_FILES = [
-    "ppi_effects_all.csv","ppi_effects_oral.csv","ppi_effects_fecal.csv","ppi_design_counts.csv",
-    "volcano_ppi_all.png","volcano_ppi_oral.png","volcano_ppi_fecal.png",
-    "volcano_int_disease_ppi.png","volcano_int_disease_site.png",
+# ---------------- DELTAS (per-rank) ----------------
+DELTAS = [f"results/deltas/deltas_{lvl}.csv" for lvl in LEVELS]
+
+# ---------------- PPI (per-rank) ----------------
+PPI_OUTDIR  = "results/ppi_interactions"
+PPI_SCRIPT  = f"{SCRIPTS_DIR}/ppi_interactions.py"
+_PPI_FILES  = [
+    "ppi_effects_all.csv",
+    "ppi_effects_oral.csv",
+    "ppi_effects_fecal.csv",
+    "ppi_design_counts.csv",
+    "volcano_ppi_all.png",
+    "volcano_ppi_oral.png",
+    "volcano_ppi_fecal.png",
+    "volcano_int_disease_ppi.png",
+    "volcano_int_disease_site.png",
 ]
 PPI_OUTPUTS = [f"{PPI_OUTDIR}/{r}/" + p for r in LEVELS for p in _PPI_FILES]
 
-# ========= Deltas =========
-DELTAS = [f"results/deltas/deltas_{lvl}.csv" for lvl in LEVELS]
+# ---------------- Helpers: QC target list (no wildcards) ----------------
+def qc_targets():
+    """Collect concrete QC outputs for all levels (used in stage_qc)."""
+    files = []
+    for lvl in LEVELS:
+        base = f"results/qc_targeted/{lvl}"
+        files += [
+            f"{base}/top_taxa_selected.csv",
+            f"{base}/box_by_ppi_oral.png",
+            f"{base}/box_by_ppi_fecal.png",
+            f"{base}/interaction_means.png",
+            f"{base}/paired_spaghetti_crohn.png",
+            f"{base}/density_top_taxa_oral.png",
+            f"{base}/density_top_taxa_fecal.png",
+        ]
+        if RUN_PCA_PERMANOVA:
+            files += [
+                f"{base}/pca_permanova/pca_scatter.png",
+                f"{base}/pca_permanova/permanova.tsv",
+            ]
+    return files
 
-# ========= Default target =========
+# ---------------- Default target ----------------
 rule all:
     input:
-        # filtering basics / diags
+        # filtering basics / diagnostics
         ORAL_NORM_OUT, FECAL_NORM_OUT, ORAL_HEALTHY_NORM_OUT, FECAL_HEALTHY_NORM_OUT,
         FILTER_REPORT, FILTER_BARPNG, Z_BY_SAMPLE_PNG, Z_BY_TAXON_PNG, LIBSIZE_PNG,
         RANK_ORAL_PNG, RANK_FECAL_PNG, PREV_ORAL_PNG, PREV_FECAL_PNG,
+
         # alpha/beta
         expand("results/alpha_models/{level}/panel_fecal_4up_raw.png", level=LEVELS),
         expand("results/beta_models/{level}/debug/done.flag", level=LEVELS),
+
         # taxa compare, DA, deltas, PPI
         TAXA_CORE_OUTPUTS, DA_OUTPUTS, DELTAS, PPI_OUTPUTS,
-        # QC targeted + ML markers
-        "qc_targeted.done", "ml_features.done"
 
-# ========== 1) PREPROCESSING ==========
+        # QC targeted (+ optional PCA/PERMANOVA if enabled)
+        expand("results/qc_targeted/{level}/top_taxa_selected.csv", level=LEVELS),
+        *(
+            sum([
+                [
+                    f"results/qc_targeted/{lvl}/pca_permanova/pca_scatter.png",
+                    f"results/qc_targeted/{lvl}/pca_permanova/permanova.tsv"
+                ] for lvl in LEVELS
+            ], [])
+            if RUN_PCA_PERMANOVA else []
+        ),
+
+        # ML (within-site & transfer; oral preserved)
+        expand("results/ml/within_fecal/{level}/cv_metrics.csv", level=LEVELS),
+        expand("results/ml/within_oral/{level}/cv_metrics.csv",  level=LEVELS),
+        expand("results/ml/transfer_f2o/{level}/metrics.csv",    level=LEVELS),
+
+        # Learning curves (fecal; optional to keep it lean)
+        expand("results/ml/learning/{level}_fecal/learning_curve.csv", level=LEVELS)
+
+# =================== 1) PREPROCESSING ===================
 rule preprocessing:
     input:
         metadata      = META_XLSX,
@@ -120,11 +195,11 @@ rule preprocessing:
         preproc_ho_collisions = "results/preprocessing/Healthy_oral_id_collisions.tsv",
         preproc_hf_map        = "results/preprocessing/Healthy_fecal_id_map.tsv",
         preproc_hf_collisions = "results/preprocessing/Healthy_fecal_id_collisions.tsv",
-        preproc_sample_qc     = "results/preprocessing/sample_qc.tsv",
+        preproc_sample_qc     = "results/preprocessing/sample_qc.tsv"
     script:
         f"{SCRIPTS_DIR}/preprocessing.py"
 
-# ========== 2) FILTERING ==========
+# =================== 2) FILTERING ===================
 rule filtering:
     input:
         oral          = ORAL_CROHN_OUT,
@@ -159,13 +234,13 @@ rule filtering:
     script:
         f"{SCRIPTS_DIR}/filtering.py"
 
-# ========== 3) ALPHA ==========
+# =================== 3) ALPHA ===================
 rule alpha_level:
     input:
         oral_crohn     = ORAL_CROHN_OUT,
         fecal_crohn    = FECAL_CROHN_OUT,
         oral_healthy   = ORAL_HEALTHY_OUT,
-        fecal_healthy  = FECAL_HEALTHY_OUT,
+        fecal_healthy  = HEALTHY_FECAL_TSV,
         covars_pool    = MODEL_TABLE_POOLED,
         pairs          = MATCHED_IDS_OUT,
         colors         = CONFIG_COLORS_YAML,
@@ -201,7 +276,7 @@ rule alpha_level:
           --level {params.level}
         """
 
-# ========== 4) BETA ==========
+# =================== 4) BETA ===================
 rule beta_level:
     input:
         oral_crohn     = ORAL_NORM_OUT,
@@ -255,7 +330,7 @@ rule beta_level:
           --permutations  {params.permutations}
         """
 
-# ========== 5) TAXA COMPARE ==========
+# =================== 5) TAXA COMPARE ===================
 rule taxa_compare:
     input:
         oc     = ORAL_NORM_OUT,
@@ -279,32 +354,27 @@ rule taxa_compare:
           --fecal-healthy {input.fh} \
           --outdir        {params.outdir} \
           --topk          {params.topk} \
+          --presence-threshold 0.2 \
+          --pairs-csv data/processed/matched_sample_ids.csv \
           --heat-topk     {params.heat_topk}
         """
 
-# ========== 6) DA with covariates ==========
-rule da_with_covariates_level:
+# =================== 6) DA with covariates ===================
+rule da_models_level:
     input:
         pct_all = lambda w: f"{TAXA_OUTDIR}/{w.level}/pct_all.csv",
         meta    = MODEL_TABLE_POOLED,
         pairs   = MATCHED_IDS_OUT,
-        script  = f"{SCRIPTS_DIR}/da_with_covariates.py"
+        script  = f"{SCRIPTS_DIR}/da_model.py"
     output:
-        f"{DA_OUTDIR}/{{level}}/da_oral_unadj_{{level}}.csv",
-        f"{DA_OUTDIR}/{{level}}/da_fecal_unadj_{{level}}.csv",
-        f"{DA_OUTDIR}/{{level}}/da_paired_{{level}}.csv",
-        f"{DA_OUTDIR}/{{level}}/da_all_adj_{{level}}.csv",
-        f"{DA_OUTDIR}/{{level}}/da_oral_adj_{{level}}.csv",
-        f"{DA_OUTDIR}/{{level}}/da_fecal_adj_{{level}}.csv",
-        f"{DA_OUTDIR}/{{level}}/volcano_oral_unadj_{{level}}.png",
-        f"{DA_OUTDIR}/{{level}}/volcano_fecal_unadj_{{level}}.png",
-        f"{DA_OUTDIR}/{{level}}/volcano_all_adj_{{level}}.png",
-        f"{DA_OUTDIR}/{{level}}/volcano_oral_adj_{{level}}.png",
-        f"{DA_OUTDIR}/{{level}}/volcano_fecal_adj_{{level}}.png"
+        DA_FILES_TEMPL
     params:
-        outdir    = DA_OUTDIR,
-        level     = lambda w: w.level,
-        heat_topk = 10
+        outdir         = DA_OUTDIR,
+        level          = lambda w: w.level,
+        deltas         = lambda w: f"results/deltas/deltas_{w.level}.csv",  # optional; script checks existence
+        heat_topk      = HEAT_TOPK,
+        volcano_metric = VOLCANO_METRIC,
+        alpha          = VOLCANO_ALPHA
     threads: 2
     shell:
         r"""
@@ -312,17 +382,15 @@ rule da_with_covariates_level:
           --pct-all {input.pct_all} \
           --meta    {input.meta} \
           --pairs   {input.pairs} \
+          --deltas  {params.deltas} \
           --rank    {params.level} \
           --outdir  {params.outdir} \
-          --heat-topk {params.heat_topk}
+          --heat-topk {params.heat_topk} \
+          --volcano-metric {params.volcano_metric} \
+          --alpha {params.alpha}
         """
 
-rule da_with_covariates:
-    input: DA_OUTPUTS
-    output: touch("da_with_covariates.done")
-    shell:  r"""echo "DA complete on $(date)" > {output}"""
-
-# ========== 7) Deltas ==========
+# =================== 7) DELTAS ===================
 rule make_deltas_level:
     input:
         pct_all = lambda w: f"{TAXA_OUTDIR}/{w.level}/pct_all.csv",
@@ -341,17 +409,12 @@ rule make_deltas_level:
           --out     {output.delta}
         """
 
-rule make_deltas:
-    input: DELTAS
-    output: touch("make_deltas.done")
-    shell:  r"""echo "Deltas complete on $(date)" > {output}"""
-
-# ========== 8) PPI interactions ==========
+# =================== 8) PPI interactions ===================
 rule ppi_interactions_level:
     input:
         pct_all = lambda w: f"{TAXA_OUTDIR}/{w.level}/pct_all.csv",
         meta    = MODEL_TABLE_POOLED,
-        script  = f"{SCRIPTS_DIR}/ppi_interactions.py"
+        pairs   = MATCHED_IDS_OUT
     output:
         f"{PPI_OUTDIR}/{{level}}/ppi_effects_all.csv",
         f"{PPI_OUTDIR}/{{level}}/ppi_effects_oral.csv",
@@ -365,55 +428,26 @@ rule ppi_interactions_level:
     params:
         outdir         = PPI_OUTDIR,
         level          = lambda w: w.level,
-        heat_topk      = 12,
-        volcano_metric = "q",
-        alpha          = 0.05
+        heat_topk      = 15,
+        volcano_metric = VOLCANO_METRIC,
+        alpha          = VOLCANO_ALPHA,
+        script_path    = PPI_SCRIPT
     shell:
         r"""
-        python {input.script} \
-          --pct-all {input.pct_all} \
-          --meta    {input.meta} \
-          --rank    {params.level} \
-          --outdir  {params.outdir} \
+        python "{params.script_path}" \
+          --pct-all "{input.pct_all}" \
+          --meta    "{input.meta}" \
+          --rank    "{params.level}" \
+          --outdir  "{params.outdir}" \
+          --pairs   "{input.pairs}" \
           --heat-topk {params.heat_topk} \
           --volcano-metric {params.volcano_metric} \
-          --alpha {params.alpha}
+          --alpha {params.alpha} \
+          --near-min 3
         """
 
-rule ppi_interactions:
-    input: PPI_OUTPUTS
-    output: touch("ppi_interactions.done")
-    shell:  r"""echo "PPI interactions finished on $(date)" > {output}"""
+# =================== 9) QC targeted (+ optional PCA/PERMANOVA) ===================
 
-# ========== 9) ML features ==========
-rule ml_features_level:
-    input:
-        pct_all = lambda w: f"{TAXA_OUTDIR}/{w.level}/pct_all.csv",
-        meta    = MODEL_TABLE_POOLED,
-        pairs   = MATCHED_IDS_OUT
-    output:
-        touch("results/ml_features/{level}/.done")
-    params:
-        outdir         = "results/ml_features",
-        level          = lambda w: w.level,
-        prevalence_min = 0.05
-    shell:
-        r"""
-        python {SCRIPTS_DIR}/build_ml_features.py \
-            --pct-all {input.pct_all} \
-            --meta    {input.meta} \
-            --pairs   {input.pairs} \
-            --rank    {params.level} \
-            --outdir  {params.outdir} \
-            --prevalence-min {params.prevalence_min}
-        """
-
-rule ml_features:
-    input:  expand("results/ml_features/{level}/.done", level=LEVELS)
-    output: touch("ml_features.done")
-    shell:  r"""echo "ML features built on $(date)" > {output}"""
-
-# ========== 10) QC targeted ==========
 rule qc_targeted_level:
     input:
         pct_all = lambda w: f"{TAXA_OUTDIR}/{w.level}/pct_all.csv",
@@ -421,13 +455,15 @@ rule qc_targeted_level:
         ppi_all = lambda w: f"{PPI_OUTDIR}/{w.level}/ppi_effects_all.csv",
         pairs   = MATCHED_IDS_OUT
     output:
-        "results/qc_targeted/{level}/top_taxa_selected.csv",
-        "results/qc_targeted/{level}/box_by_ppi_oral.png",
-        "results/qc_targeted/{level}/box_by_ppi_fecal.png",
-        "results/qc_targeted/{level}/interaction_means.png",
-        "results/qc_targeted/{level}/paired_spaghetti_crohn.png",
-        "results/qc_targeted/{level}/density_top_taxa_oral.png",
-        "results/qc_targeted/{level}/density_top_taxa_fecal.png"
+        top        = "results/qc_targeted/{level}/top_taxa_selected.csv",
+        box_o      = "results/qc_targeted/{level}/box_by_ppi_oral.png",
+        box_f      = "results/qc_targeted/{level}/box_by_ppi_fecal.png",
+        inter      = "results/qc_targeted/{level}/interaction_means.png",
+        spaghetti  = "results/qc_targeted/{level}/paired_spaghetti_crohn.png",
+        kde_o      = "results/qc_targeted/{level}/density_top_taxa_oral.png",
+        kde_f      = "results/qc_targeted/{level}/density_top_taxa_fecal.png",
+        pca_scatter= "results/qc_targeted/{level}/pca_permanova/pca_scatter.png",
+        permanova  = "results/qc_targeted/{level}/pca_permanova/permanova.tsv"
     params:
         outdir = "results/qc_targeted",
         level  = lambda w: w.level,
@@ -441,11 +477,204 @@ rule qc_targeted_level:
             --pairs   {input.pairs} \
             --rank    {params.level} \
             --outdir  {params.outdir} \
-            --topk    {params.topk}
-            # --colors {CONFIG_COLORS_YAML}   # ← اگر qc_targeted.py از --colors پشتیبانی می‌کند، این خط را از کامنت خارج کن
+            --topk    {params.topk} \
+            --with-pca-permanova
+
+        # hard checks
+        test -f {output.top}
+        test -f {output.box_o}
+        test -f {output.box_f}
+        test -f {output.inter}
+        test -f {output.spaghetti}
+        test -f {output.kde_o}
+        test -f {output.kde_f}
+        test -f {output.pca_scatter}
+        test -f {output.permanova}
         """
 
-rule qc_targeted:
-    input:  expand("results/qc_targeted/{level}/top_taxa_selected.csv", level=LEVELS)
-    output: touch("qc_targeted.done")
-    shell:  r"""echo "QC targeted finished on $(date)" > {output}"""
+# ---------------- Convenience stage aliases ----------------
+rule stage_qc:
+    input:
+        qc_targets()
+
+# =================== 10) Reports (examples) ===================
+rule report_alpha_beta:
+    input:
+        expand("results/alpha_models/{level}/alpha_models_oral.csv",  level=LEVELS),
+        expand("results/alpha_models/{level}/alpha_models_fecal.csv", level=LEVELS),
+        expand("results/beta_models/{level}/permanova_interaction_bray.csv", level=LEVELS),
+        "config/colors.yml"
+    output:
+        "results/alpha_beta/summary.md"
+    shell:
+        r"""
+        python scripts/report_alpha_beta.py \
+          --colors config/colors.yml \
+          --out results/alpha_beta/summary.md
+        """
+
+rule report_da_ppi_qc:
+    input:
+        expand("results/da_models/{level}/da_all_adj_{level}.csv",     level=LEVELS),
+        expand("results/ppi_interactions/{level}/ppi_effects_all.csv", level=LEVELS),
+        expand("results/qc_targeted/{level}/top_taxa_selected.csv",    level=LEVELS),
+        "config/colors.yml"
+    output:
+        "results/da_ppi_qc/summary.md"
+    shell:
+        r"""
+        python scripts/report_da_ppi_qc.py \
+          --colors config/colors.yml \
+          --out results/da_ppi_qc/summary.md
+        """
+
+# =================== 11) ML (no pre-built features; Oral kept) ===================
+# --------------- constants ---------------
+LEVELS = ["genus", "species"]
+TAXA_OUTDIR = "results/taxa_compare"
+MODEL_TABLE_POOLED = "data/meta/model_table_pooled.csv"
+MATCHED_IDS_OUT = "data/processed/matched_sample_ids.csv"
+
+ML_MODEL = "logit_enet"
+ML_FOLDS = 3
+ML_INNER = 3
+ML_SEED  = 42
+ML_GROUP = "subject_id"
+
+# --------------- within: fecal ---------------
+rule ml_within_fecal:
+    input:
+        pct   = lambda w: f"{TAXA_OUTDIR}/{w.level}/pct_all.csv",
+        meta  = MODEL_TABLE_POOLED,
+        pairs = MATCHED_IDS_OUT
+    output:
+        cv     = "results/ml/within_fecal/{level}/cv_metrics.csv",
+        roc    = "results/ml/within_fecal/{level}/roc_pr.png",
+        folds  = "results/ml/within_fecal/{level}/cv_folds.png",
+        imps   = "results/ml/within_fecal/{level}/importances.csv"
+    params:
+        outdir = lambda w: f"results/ml/within_fecal/{w.level}",
+        level  = lambda w: w.level
+    shell:
+        r"""
+        python -m scripts.ml.train within \
+          --pct-all {input.pct} \
+          --meta    {input.meta} \
+          --site    fecal \
+          --rank    {params.level} \
+          --model   {ML_MODEL} \
+          --folds   {ML_FOLDS} --inner-folds {ML_INNER} \
+          --group-col {ML_GROUP} \
+          --pairs   {input.pairs} \
+          --random-state {ML_SEED} \
+          --outdir  {params.outdir}
+        """
+
+# --------------- within: oral ---------------
+rule ml_within_oral:
+    input:
+        pct   = lambda w: f"{TAXA_OUTDIR}/{w.level}/pct_all.csv",
+        meta  = MODEL_TABLE_POOLED,
+        pairs = MATCHED_IDS_OUT
+    output:
+        cv     = "results/ml/within_oral/{level}/cv_metrics.csv",
+        roc    = "results/ml/within_oral/{level}/roc_pr.png",
+        folds  = "results/ml/within_oral/{level}/cv_folds.png",
+        imps   = "results/ml/within_oral/{level}/importances.csv"
+    params:
+        outdir = lambda w: f"results/ml/within_oral/{w.level}",
+        level  = lambda w: w.level
+    shell:
+        r"""
+        python -m scripts.ml.train within \
+          --pct-all {input.pct} \
+          --meta    {input.meta} \
+          --site    oral \
+          --rank    {params.level} \
+          --model   {ML_MODEL} \
+          --folds   {ML_FOLDS} --inner-folds {ML_INNER} \
+          --group-col {ML_GROUP} \
+          --pairs   {input.pairs} \
+          --random-state {ML_SEED} \
+          --outdir  {params.outdir}
+        """
+
+# --------------- transfer: fecal → oral ---------------
+rule ml_transfer_f2o:
+    input:
+        pct   = lambda w: f"{TAXA_OUTDIR}/{w.level}/pct_all.csv",
+        meta  = MODEL_TABLE_POOLED,
+        pairs = MATCHED_IDS_OUT
+    output:
+        metrics = "results/ml/transfer_f2o/{level}/metrics.csv",
+        roc     = "results/ml/transfer_f2o/{level}/roc_pr.png"
+    params:
+        outdir = lambda w: f"results/ml/transfer_f2o/{w.level}",
+        level  = lambda w: w.level
+    shell:
+        r"""
+        python -m scripts.ml.train transfer \
+          --pct-all {input.pct} \
+          --meta    {input.meta} \
+          --train-site fecal \
+          --test-site  oral \
+          --rank    {params.level} \
+          --model   {ML_MODEL} \
+          --group-col {ML_GROUP} \
+          --pairs   {input.pairs} \
+          --disjoint-drop train \
+          --feature-mode intersection \
+          --random-state {ML_SEED} \
+          --outdir  {params.outdir}
+        """
+
+# --------------- paired transfer (LOSO) ---------------
+rule ml_transfer_paired_f2o:
+    input:
+        pct   = lambda w: f"{TAXA_OUTDIR}/{w.level}/pct_all.csv",
+        meta  = MODEL_TABLE_POOLED,
+        pairs = MATCHED_IDS_OUT
+    output:
+        metrics  = "results/ml/transfer_paired_f2o/{level}/metrics.csv",
+        roc      = "results/ml/transfer_paired_f2o/{level}/roc_pr.png",
+        per_sub  = "results/ml/transfer_paired_f2o/{level}/per_subject.csv",
+        preds    = "results/ml/transfer_paired_f2o/{level}/preds.csv"
+    params:
+        outdir = lambda w: f"results/ml/transfer_paired_f2o/{w.level}",
+        level  = lambda w: w.level
+    shell:
+        r"""
+        python -m scripts.ml.train paired_transfer \
+          --pct-all {input.pct} \
+          --meta    {input.meta} \
+          --pairs   {input.pairs} \
+          --rank    {params.level} \
+          --model   {ML_MODEL} \
+          --folds   {ML_FOLDS} --inner-folds {ML_INNER} \
+          --group-col {ML_GROUP} \
+          --random-state {ML_SEED} \
+          --outdir  {params.outdir}
+        """
+
+# --------------- stage: run all ML targets ---------------
+rule stage_ml:
+    input:
+        # within (fecal & oral): metrics + plots + importances
+        expand("results/ml/within_fecal/{level}/cv_metrics.csv", level=LEVELS),
+        expand("results/ml/within_fecal/{level}/cv_folds.png",   level=LEVELS),
+        expand("results/ml/within_fecal/{level}/roc_pr.png",     level=LEVELS),
+        expand("results/ml/within_fecal/{level}/importances.csv",level=LEVELS),
+        expand("results/ml/within_oral/{level}/cv_metrics.csv",  level=LEVELS),
+        expand("results/ml/within_oral/{level}/cv_folds.png",    level=LEVELS),
+        expand("results/ml/within_oral/{level}/roc_pr.png",      level=LEVELS),
+        expand("results/ml/within_oral/{level}/importances.csv", level=LEVELS),
+
+        # transfer F→O
+        expand("results/ml/transfer_f2o/{level}/metrics.csv",    level=LEVELS),
+        expand("results/ml/transfer_f2o/{level}/roc_pr.png",     level=LEVELS),
+
+        # paired transfer F→O
+        expand("results/ml/transfer_paired_f2o/{level}/metrics.csv",     level=LEVELS),
+        expand("results/ml/transfer_paired_f2o/{level}/roc_pr.png",      level=LEVELS),
+        expand("results/ml/transfer_paired_f2o/{level}/per_subject.csv", level=LEVELS),
+        expand("results/ml/transfer_paired_f2o/{level}/preds.csv",       level=LEVELS)

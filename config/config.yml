@@ -1,36 +1,106 @@
-# Minimal, single source of truth for paths and knobs
+# ============================================================
+# config.yaml — single source of truth for the pipeline
+# Compatible with the current Snakefile layout you shared
+#
+# Notes:
+# - Volcano metric: "q" (FDR) is recommended for discovery; use alpha=0.10
+# - If you switch to "p", set alpha to 0.05 unless stated otherwise
+# - Transfer direction below is TRAIN: Fecal → TEST: Oral (matches Snakefile)
+# ============================================================
 
+# ---------- Global volcano controls (read by Snakefile) ----------
+volcano_metric: "q"   # "q" or "p"
+volcano_alpha: 0.10   # if metric="p", typical choice is 0.05
+heat_topk: 10         # label budget per side for volcano plots
+
+# ---------- Ranks & sites ----------
+# Snakefile reads "levels" (not "ranks"); keep both ranks here for clarity.
+levels: [genus, species]
+sites:  [oral, fecal]   # not strictly required by Snakefile, kept for scripts/clarity
+
+# ---------- QC: PCA/PERMANOVA toggles ----------
+run_pca_permanova: true
+pca_factor: "disease"   # grouping factor used by batch_pca_permanova.py (e.g., "disease", "PPI_use", "site")
+
+# ---------- Canonical paths (used by scripts and for documentation) ----------
 paths:
-  # main meta (pooled) with normalized Sample_IDs
+  # pooled metadata with normalized Sample_ID
   meta_pooled: data/meta/model_table_pooled.csv
-  # matched oral–fecal pairs (Crohn); two ستون oral/fecal با هر اسمی باشد auto-detect می‌شود
+
+  # matched oral–fecal pairs (Crohn); columns are auto-detected by scripts
   pairs: data/processed/matched_sample_ids.csv
 
-  # abundance tables already filtered/normalized used by beta/taxa_compare (as you have)
+  # filtered/normalized abundance tables used by beta/taxa_compare
   oral_crohn:    data/filtered/oral_abund_crohn_filtered_normalized.csv
   fecal_crohn:   data/filtered/fecal_abund_crohn_filtered_normalized.csv
   oral_healthy:  data/filtered/oral_abund_healthy_filtered_normalized.csv
   fecal_healthy: data/filtered/fecal_abund_healthy_filtered_normalized.csv
 
-  # colors (shared by R & Py)
+  # shared color map for R & Python figures
   colors: config/colors.yml
 
-# taxa compare parameters (affects selection & plots)
-taxa_compare:
-  topk: 15
-  presence_pct: 0.10
-  prevalence: 0.10
+  # (optional) raw inputs if preprocessing is run
+  raw_meta_xlsx:        data/Metadata_metagenomics.xlsx
+  raw_crohn_metaphlan:  data/utrecht_metaphlan_merged.txt
+  raw_healthy_oral:     data/oral_only_results_metaphlan4.txt
+  raw_healthy_fecal:    data/fecal_only_results_metaphlan4.txt
 
-# covariates to include in adjusted analyses
+# ---------- Taxa-compare parameters ----------
+taxa_compare:
+  topk: 15              # label budget for bars/heatmaps
+  presence_pct: 0.10    # min presence fraction (0..1) to include a taxon
+  prevalence: 0.10      # prevalence cutoff used in summaries
+  heat_topk: 15         # top labels on heatmaps
+
+# ---------- Covariates to include in adjusted analyses ----------
 covariates:
   base: [Age, Sex, BMI, Smoking, Antibiotics_3m, PPI_use, Steroids_ongoing, Immuno_ongoing]
   crohn_severity: [HBI_baseline_raw, Calprotectin_baseline_raw]
 
-# ranks to produce
-ranks: [genus, species]
+# ---------- Filtering defaults (used by filtering.py) ----------
+filtering:
+  level: "species"         # analysis rank at filtering stage
+  prevalence_oral:  0.20
+  prevalence_fecal: 0.20
+  abundance:        0.10
+  agg: "mean"
+  align_by_site: true
+  mean_on_positives: false
+  pseudocount: 1.0e-6
+  qc_level: "lite"
+  emit_clr: false
 
-# ML defaults
+# ---------- Alpha/Beta analysis knobs ----------
+alpha_beta:
+  pseudocount: 1.0e-6
+  permutations: 999
+
+# ---------- DA controls (kept for completeness; Snakefile uses global volcano_*) ----------
+da:
+  volcano_metric: "q"
+  volcano_alpha: 0.10
+  heat_topk: 12
+
+# ---------- PPI interaction plot controls (align with DA) ----------
+ppi:
+  volcano_metric: "q"
+  volcano_alpha: 0.10
+  heat_topk: 12
+
+# ---------- ML settings (these keys are read directly by Snakefile) ----------
+ml_model: "logit_enet"     # e.g., "logit_enet", "rf", "xgb"
+ml_outer_folds: 5
+ml_inner_folds: 3
+ml_seed: 42
+
+# Optional: additional ML preferences for scripts (not strictly required by Snakefile)
 ml:
-  seed: 42
-  kfolds: 5
-  models: [logreg, l1, rf]   # used inside your ml_cv.py
+  models: [logreg, l1, rf]  # if a script consumes a list; otherwise ignored
+  prevalence_min: 0.05      # feature prevalence filter when building ML matrices
+
+# ---------- Robustness / diagnostics ----------
+robustness:
+  batch_factor: "site"      # change to "batch" if you have a batch column
+  transfer:
+    train_site: "Fecal"     # MUST match Snakefile (fecal → oral transfer rule)
+    test_site:  "Oral"

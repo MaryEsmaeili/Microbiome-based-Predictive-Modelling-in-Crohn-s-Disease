@@ -1,74 +1,74 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Preprocessing for microbiome pipeline:
+Preprocessing for microbiome pipeline (English-only comments):
 - Read metadata Excel + merged MetaPhlAn tables (Crohn + Healthy oral/fecal).
-- Normalize/clean sample IDs, resolve duplicate sample columns with KEEP-ONE policy.
-- Keep species-level rows only, drop unclassified, and (if needed) renormalize columns to sum=1.
-- Save split abundance tables + matched ID trace + summary + mapping/collision logs.
+- Normalize/clean sample IDs while preserving leading zeros (NO numeric casting).
+- Utrecht (Crohn): extract Sdddd from column names, resolve duplicate sample columns via KEEP-ONE (max library size).
+- Healthy: extract 6-digit IDs from headers, resolve duplicates via KEEP-ONE.
+- Keep ONLY species-level rows (contain '|s__'), drop unclassified, renormalize columns to sum=1 when needed.
+- Save split abundance tables + matched ID mapping + summary + mapping/collision logs.
 
-This script is meant to be executed by Snakemake `script:` directive (uses `snakemake` globals).
+This script is meant to be executed via Snakemake `script:` and uses `snakemake` globals.
 """
 
+from pathlib import Path
+from typing import Optional, List, Dict, Tuple
 import re
 import json
-from pathlib import Path
-from typing import Optional, List, Tuple, Dict
 
-import pandas as pd
 import numpy as np
-
+import pandas as pd
 
 # -------------------------- small utils --------------------------
 
 def ensure_dir_for_file(path: Path) -> None:
+    """Create parent directories for a path if they do not exist."""
     path = Path(path)
     if path.parent:
         path.parent.mkdir(parents=True, exist_ok=True)
 
-
 def to_numeric_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Coerce all columns to numeric, preserving NaN on failures."""
     return df.apply(pd.to_numeric, errors="coerce")
 
-
-def _write_tsv(df: pd.DataFrame, path: Path):
+def _write_tsv(df: pd.DataFrame, path: Path) -> None:
     ensure_dir_for_file(path)
     df.to_csv(path, sep="\t", index=False)
 
-
-def _write_csv(df: pd.DataFrame, path: Path, index: bool):
+def _write_csv(df: pd.DataFrame, path: Path, index: bool) -> None:
     ensure_dir_for_file(path)
     df.to_csv(path, index=index)
 
+# -------------------------- ID utilities --------------------------
 
-# -------------------------- ID normalization --------------------------
-
-def norm_id_canonical(x: str, width: int = 5) -> str | float:
+def norm_metadata_id(x: str) -> str:
     """
-    Normalize sample IDs to a canonical short token used in Utrecht merged file:
-    - strip whitespace
-    - remove trailing ".0"
-    - keep first `width` characters
-    - if starts with '0' then lstrip zeros but keep at least one "0"
-    Returns np.nan for NA-ish inputs.
+    Normalize metadata IDs:
+    - Trim and uppercase
+    - Remove trailing '.rep' or '.<number>' if present
+    - DO NOT cast to numeric (leading zeros are preserved)
     """
-    if pd.isna(x):
-        return np.nan
     s = str(x).strip()
-    if s.endswith(".0"):
-        s = s[:-2]
-    if s and s[0] == "0":
-        s = s.lstrip("0") or "0"
-    return s[:width]
+    s = re.sub(r"\.(?:rep|[0-9]+)$", "", s, flags=re.IGNORECASE)
+    return s.upper()
 
+def norm_utrecht_colname(col: str) -> Optional[str]:
+    """
+    Extract 'S' followed by 4 digits (e.g., S0086) from Utrecht merged MetaPhlAn column names.
+    Returns None if not found.
+    """
+    s = str(col).strip()
+    m = re.search(r"(S\d{4})", s, flags=re.IGNORECASE)
+    return m.group(1).upper() if m else None
 
 def extract_healthy_id(colname: str) -> str:
     """
-    Heuristics to extract a 6-digit ID from healthy MetaPhlAn headers.
-    Falls back to last 12 chars if no 6-digit chunk is present.
+    Extract a 6-digit ID from healthy MetaPhlAn column names.
+    Tries patterns like '-012345_metaphlan' or the last 6 digits; falls back to a trimmed tail token.
     """
     s = str(colname).strip()
-    m = re.search(r"-(\d{6})(?=_(?:rerun_)?metaphlan$)", s, flags=re.IGNORECASE)
+    m = re.search(r"-(\d{6})(?=_(?:rerun_)?metaphlan\b)", s, flags=re.IGNORECASE)
     if m:
         return m.group(1)
     m2 = re.search(r"(\d{6})(?!.*\d)", s)
@@ -80,89 +80,70 @@ def extract_healthy_id(colname: str) -> str:
     m3 = re.search(r"(\d{6})", base)
     if m3:
         return m3.group(1)
-    return base[:12]
-
+    return base[-12:]
 
 # -------------------------- species-level & normalization --------------------------
 
 def keep_species_only(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Keep only species-level rows (contain '|s__') and drop unclassified species.
-    Assumes index is clade_name (MetaPhlAn format).
-    """
+    """Keep rows containing '|s__' and drop 'unclassified' species."""
     idx = df.index.astype(str)
     mask_species = idx.str.contains(r"\|s__", regex=True, na=False)
     out = df.loc[mask_species].copy()
     bad = out.index.astype(str).str.contains(r"s__unclassified|unclassified", case=False, na=False)
-    out = out.loc[~bad]
-    return out
-
+    return out.loc[~bad]
 
 def renorm_cols_to_one(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Renormalize each sample column to sum=1 (only if column sum>0).
-    """
+    """Renormalize columns to sum to 1 when sums are neither 0 nor ~1."""
     colsum = df.sum(axis=0)
-    needs = ~colsum.round(6).isin([0.0, 1.0])  # if already ~1, skip
+    needs = ~colsum.round(6).isin([0.0, 1.0])
     if not needs.any():
         return df
     colsum_safe = colsum.replace(0, np.nan)
     return df.div(colsum_safe, axis=1).fillna(0.0)
 
-
 # -------------------------- duplicate resolution --------------------------
 
 def _choose_one_among_duplicates(df_num: pd.DataFrame, originals: List[str]) -> str:
     """
-    Choose the 'best' original column among duplicates by largest library size (sum).
-    Fallback to first appearance if ties/NaN.
+    Resolve duplicated sample columns by choosing the one with the largest library size (sum).
+    On ties, keep the earliest column.
     """
     if len(originals) == 1:
         return originals[0]
-    sums = {}
-    for c in originals:
-        series = pd.to_numeric(df_num[c], errors="coerce")
-        sums[c] = float(series.fillna(0).sum())
-    best = max(originals, key=lambda c: (sums.get(c, 0.0), -originals.index(c)))
-    return best
-
+    sums = {c: float(pd.to_numeric(df_num[c], errors="coerce").fillna(0).sum()) for c in originals}
+    return max(originals, key=lambda c: (sums.get(c, 0.0), -originals.index(c)))
 
 # -------------------------- parsers --------------------------
 
 def parse_utrecht_merged(tsv_path: Path,
                          map_out: Path,
-                         collisions_out: Path,
-                         width: int = 5) -> tuple[pd.DataFrame, dict]:
+                         collisions_out: Path) -> Tuple[pd.DataFrame, Dict[str, str]]:
     """
-    Parse Utrecht merged MetaPhlAn table (Crohn):
-    - Input columns: '#clade_name','NCBI_tax_id', then samples.
-    - Remove duplicate sample columns by KEEP-ONE policy (decided by library size).
-    - Return abundance df (index=clade_name, cols=normalized keys) and kept_map (norm_key -> kept_original).
-    - Write mapping and collisions to provided paths.
+    Parse Utrecht merged MetaPhlAn (Crohn):
+    - Map original columns to Sdddd keys.
+    - Resolve duplicates via KEEP-ONE (max library size).
+    - Return abundance (index=clade_name, cols=Sdddd) and kept_map (Sdddd -> kept original).
+    - Write mapping and collision logs.
     """
-    df = pd.read_csv(tsv_path, sep="\t")
+    df = pd.read_csv(tsv_path, sep="\t", low_memory=False)
+    if "#clade_name" in df.columns:
+        df = df.rename(columns={"#clade_name": "clade_name"})
     rowdata = df.iloc[:, :2].copy()
-    if "#clade_name" in rowdata.columns:
-        rowdata = rowdata.rename(columns={"#clade_name": "clade_name"})
     abund_raw = df.iloc[:, 2:].copy()
 
-    # Drop accidental *_y merge artifacts (if any)
-    drop_cols = [c for c in abund_raw.columns if str(c).endswith("_y")]
-    abund_raw = abund_raw.drop(columns=drop_cols, errors="ignore")
-
-    abund_num = to_numeric_df(abund_raw)
+    abund_num = to_numeric_df(abund_raw).fillna(0.0)
 
     orig_cols = list(abund_raw.columns)
-    norm_cols = [norm_id_canonical(c, width=width) for c in orig_cols]
+    norm_cols = [norm_utrecht_colname(c) for c in orig_cols]
     id_map_df = pd.DataFrame({"original": orig_cols, "normalized": norm_cols})
     _write_tsv(id_map_df, map_out)
 
-    # group originals by normalized key
     by_norm: Dict[str, List[str]] = {}
     for o, n in zip(orig_cols, norm_cols):
+        if n is None:
+            continue
         by_norm.setdefault(n, []).append(o)
 
-    # resolve duplicates
     collisions_rows = []
     kept_map: Dict[str, str] = {}
     kept_originals = []
@@ -180,37 +161,31 @@ def parse_utrecht_merged(tsv_path: Path,
             })
 
     collisions_df = pd.DataFrame(collisions_rows)
-    # always write a collisions file (even if empty)
     if collisions_df.empty:
         collisions_df = pd.DataFrame(columns=["normalized_key", "kept_original", "dropped_originals", "n_sources"])
     _write_tsv(collisions_df, collisions_out)
 
     abund_kept = abund_raw[kept_originals].copy()
-    inv_map = {v: k for k, v in kept_map.items()}  # kept original -> normalized key
+    inv_map = {v: k for k, v in kept_map.items()}  # kept original -> normalized Sdddd
     abund_kept.columns = [inv_map[c] for c in abund_kept.columns]
 
-    abund_kept.index = rowdata["clade_name"].values
-    # drop all-zero features
+    abund_kept.index = rowdata.iloc[:, 0].values  # clade_name
     abund_kept = abund_kept.loc[abund_kept.sum(axis=1) > 0]
 
-    # species-only + optional renorm
     abund_kept = keep_species_only(abund_kept)
     abund_kept = renorm_cols_to_one(abund_kept)
 
     return abund_kept, kept_map
 
-
 def parse_metaphlan_healthy(tsv_path: Path,
                             map_out: Path,
-                            collisions_out: Path,
-                            log_prefix: str) -> tuple[pd.DataFrame, dict]:
+                            collisions_out: Path) -> Tuple[pd.DataFrame, Dict[str, str]]:
     """
-    Parse healthy MetaPhlAn merged table:
-    - Index: clade_name (first column).
+    Parse healthy merged MetaPhlAn:
+    - Drop NCBI_tax_id if present; index is clade_name (first column).
     - Extract 6-digit IDs from column names.
-    - Resolve duplicate extracted keys by KEEP-ONE (library size).
-    - Return abundance df (index=clade_name, cols=extracted IDs) + kept_map (extracted_key -> kept_original).
-    - Write mapping/collisions to paths.
+    - Resolve duplicates via KEEP-ONE (max library size).
+    - Return abundance (index=clade_name, cols=6-digit) and kept_map.
     """
     df = pd.read_csv(tsv_path, sep="\t", comment="#", header=0, index_col=0, low_memory=False)
     df = df.drop(columns=["NCBI_tax_id"], errors="ignore")
@@ -247,16 +222,14 @@ def parse_metaphlan_healthy(tsv_path: Path,
     _write_tsv(collisions_df, collisions_out)
 
     kept = df_num[kept_originals].copy()
-    inv_map = {v: k for k, v in kept_map.items()}  # kept original -> extracted key
+    inv_map = {v: k for k, v in kept_map.items()}  # kept original -> 6-digit id
     kept.columns = [inv_map[c] for c in kept.columns]
     kept = kept.loc[kept.sum(axis=1) > 0]
 
-    # species-only + optional renorm
     kept = keep_species_only(kept)
     kept = renorm_cols_to_one(kept)
 
     return kept, kept_map
-
 
 # -------------------------- metadata loader --------------------------
 
@@ -264,6 +237,7 @@ def load_metadata(metadata_file: Path) -> pd.DataFrame:
     """
     Load metadata Excel and ensure columns: STUDY_ID, Oral_sample_ID, Fecal_sample_ID.
     Supports normal header or row-oriented (variable names in first column).
+    Leading zeros in IDs are preserved.
     """
     meta_raw = pd.read_excel(metadata_file, header=None)
     first_row = meta_raw.iloc[0].astype(str).str.lower().tolist()
@@ -272,7 +246,6 @@ def load_metadata(metadata_file: Path) -> pd.DataFrame:
     if looks_like_header:
         meta = pd.read_excel(metadata_file)
     else:
-        # row-oriented: variable names in col 0
         meta = pd.read_excel(metadata_file, header=None, index_col=0).T.reset_index(drop=True)
 
     meta.columns = meta.columns.astype(str).str.strip()
@@ -282,17 +255,14 @@ def load_metadata(metadata_file: Path) -> pd.DataFrame:
         raise ValueError(f"Missing required metadata columns: {missing}")
 
     meta = meta[required].copy()
-    meta["Oral_clean"]  = meta["Oral_sample_ID"].apply(lambda x: norm_id_canonical(x, width=5))
-    meta["Fecal_clean"] = meta["Fecal_sample_ID"].apply(lambda x: norm_id_canonical(x, width=5))
+    meta["Oral_clean"]  = meta["Oral_sample_ID"].map(norm_metadata_id)
+    meta["Fecal_clean"] = meta["Fecal_sample_ID"].map(norm_metadata_id)
     return meta
-
 
 # -------------------------- QC (optional) --------------------------
 
 def qc_table(df: pd.DataFrame, name: str) -> pd.DataFrame:
-    """
-    Build a lightweight per-sample QC: nonzero species count, column sum, Shannon.
-    """
+    """Basic per-sample QC: nonzero species count, column sum, Shannon entropy."""
     nz = (df > 0).sum(axis=0)
     colsum = df.sum(axis=0)
     df_safe = df.replace(0, np.nan)
@@ -307,8 +277,7 @@ def qc_table(df: pd.DataFrame, name: str) -> pd.DataFrame:
     out["flag_low_richness"] = (out["species_nonzero"] < 10).astype(int)
     return out
 
-
-# -------------------------- main driver --------------------------
+# -------------------------- driver --------------------------
 
 def run_preprocess(metadata_file: Path,
                    crohn_file: Path,
@@ -332,15 +301,12 @@ def run_preprocess(metadata_file: Path,
     # 1) metadata
     meta = load_metadata(metadata_file)
 
-    # 2) Crohn merged -> resolve duplicates, species-only, renorm
+    # 2) Crohn (Utrecht)
     abund_utrecht, u_kept_map = parse_utrecht_merged(
-        crohn_file,
-        map_out=u_map_out,
-        collisions_out=u_collisions_out,
-        width=5
+        crohn_file, map_out=u_map_out, collisions_out=u_collisions_out
     )
 
-    # 3) match oral/fecal against available cols
+    # 3) match oral/fecal against available Sdddd columns
     available = set(abund_utrecht.columns)
     meta["Oral_col"]  = meta["Oral_clean"].where(meta["Oral_clean"].isin(available))
     meta["Fecal_col"] = meta["Fecal_clean"].where(meta["Fecal_clean"].isin(available))
@@ -353,27 +319,17 @@ def run_preprocess(metadata_file: Path,
 
     matched = meta.dropna(subset=["Oral_col", "Fecal_col"]).reset_index(drop=True)
 
-    # 4) split Crohn (only matched) and drop all-zero features (already done)
+    # 4) split Crohn (only matched)
     oral_crohn  = abund_utrecht.loc[:, matched["Oral_col"].unique()].copy()
     fecal_crohn = abund_utrecht.loc[:, matched["Fecal_col"].unique()].copy()
 
-    # 5) Healthy oral/fecal -> resolve duplicates, species-only, renorm
-    oral_healthy,  ho_kept_map = parse_metaphlan_healthy(
-        healthy_oral_in,
-        map_out=ho_map_out,
-        collisions_out=ho_collisions_out,
-        log_prefix="Healthy_oral"
-    )
-    fecal_healthy, hf_kept_map = parse_metaphlan_healthy(
-        healthy_fecal_in,
-        map_out=hf_map_out,
-        collisions_out=hf_collisions_out,
-        log_prefix="Healthy_fecal"
-    )
+    # 5) Healthy
+    oral_healthy,  _ = parse_metaphlan_healthy(healthy_oral_in,  map_out=ho_map_out, collisions_out=ho_collisions_out)
+    fecal_healthy, _ = parse_metaphlan_healthy(healthy_fecal_in, map_out=hf_map_out, collisions_out=hf_collisions_out)
 
-    # 6) save main outputs
-    _write_csv(oral_crohn,  out_oral_crohn,  index=True)
-    _write_csv(fecal_crohn, out_fecal_crohn, index=True)
+    # 6) save
+    _write_csv(oral_crohn,    out_oral_crohn,    index=True)
+    _write_csv(fecal_crohn,   out_fecal_crohn,   index=True)
     _write_csv(oral_healthy,  out_oral_healthy,  index=True)
     _write_csv(fecal_healthy, out_fecal_healthy, index=True)
 
@@ -383,12 +339,12 @@ def run_preprocess(metadata_file: Path,
     matched_save["fecal_original_kept"] = matched_save["fecal"].map(lambda k: u_kept_map.get(k, "NA"))
     _write_csv(matched_save, matched_out, index=False)
 
-    # 7) optional per-sample QC file (not required by rule)
+    # 7) QC (optional)
     qc_rows = []
-    if not oral_crohn.empty:   qc_rows.append(qc_table(oral_crohn,  "crohn_oral_matched"))
-    if not fecal_crohn.empty:  qc_rows.append(qc_table(fecal_crohn, "crohn_fecal_matched"))
-    if not oral_healthy.empty: qc_rows.append(qc_table(oral_healthy, "healthy_oral"))
-    if not fecal_healthy.empty:qc_rows.append(qc_table(fecal_healthy,"healthy_fecal"))
+    if not oral_crohn.empty:    qc_rows.append(qc_table(oral_crohn,    "crohn_oral_matched"))
+    if not fecal_crohn.empty:   qc_rows.append(qc_table(fecal_crohn,   "crohn_fecal_matched"))
+    if not oral_healthy.empty:  qc_rows.append(qc_table(oral_healthy,  "healthy_oral"))
+    if not fecal_healthy.empty: qc_rows.append(qc_table(fecal_healthy, "healthy_fecal"))
     if qc_rows:
         qc_all = pd.concat(qc_rows, ignore_index=True)
         _write_tsv(qc_all, extra_dir / "sample_qc.tsv")
@@ -400,12 +356,8 @@ def run_preprocess(metadata_file: Path,
             "n_matched_rows": int(matched.shape[0]),
             "n_unmatched_rows": int(unmatched.shape[0]),
         },
-        "healthy_oral": {
-            "n_cols_kept": int(len(oral_healthy.columns)),
-        },
-        "healthy_fecal": {
-            "n_cols_kept": int(len(fecal_healthy.columns)),
-        },
+        "healthy_oral":  {"n_cols_kept": int(len(oral_healthy.columns))},
+        "healthy_fecal": {"n_cols_kept": int(len(fecal_healthy.columns))},
         "notes": {
             "duplicate_policy": "KEEP-ONE (max library size), no summation.",
             "feature_level": "species only (|s__), unclassified removed",
@@ -425,16 +377,13 @@ def run_preprocess(metadata_file: Path,
     print(f"[preprocessing] Summary written to: {summary_json}")
     print(f"[preprocessing] Logs in: {extra_dir}")
 
-
 # -------------------------- Snakemake entry --------------------------
 
 if __name__ == "__main__":
-    # This script is intended to be run by Snakemake via `script:`.
-    # We still guard for clarity.
     try:
-        snakemake  # type: ignore # noqa: F821
+        snakemake  # type: ignore  # noqa: F821
     except NameError:
-        raise RuntimeError("This script must be executed via Snakemake (script:).")
+        raise RuntimeError("Run this via Snakemake (script:).")
 
     md  = Path(snakemake.input["metadata"])        # noqa: F821
     cr  = Path(snakemake.input["crohn"])           # noqa: F821
