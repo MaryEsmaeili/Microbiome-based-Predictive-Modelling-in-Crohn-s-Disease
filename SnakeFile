@@ -206,7 +206,20 @@ rule all:
 
         # QC targeted (plus optional PCA/PERMANOVA)
         qc_targets(),
-
+        expand("results/qc_targeted/{level}/qc_summary.tsv",              level=LEVELS),
+        expand("results/qc_targeted/{level}/counts_site_disease.png",     level=LEVELS),
+        expand("results/qc_targeted/{level}/counts_site_disease_ppi.png", level=LEVELS),
+        expand("results/qc_targeted/{level}/box_ppi_oral.png",            level=LEVELS),
+        expand("results/qc_targeted/{level}/box_ppi_fecal.png",           level=LEVELS),
+        expand("results/qc_targeted/{level}/interaction_means.png",       level=LEVELS),
+        expand("results/qc_targeted/{level}/spaghetti_crohn.png",         level=LEVELS),
+        expand("results/qc_targeted/{level}/kde_oral.png",                level=LEVELS),
+        expand("results/qc_targeted/{level}/kde_fecal.png",               level=LEVELS)
+        + (
+            expand("results/qc_targeted/{level}/pca_scatter.png",         level=LEVELS) +
+            expand("results/qc_targeted/{level}/permanova.tsv",           level=LEVELS)
+            if RUN_PCA_PERMANOVA else []
+        ),
         # ML (within-site & transfer; oral preserved)
         expand("results/ml/within_fecal/{level}/cv_metrics.csv", level=LEVELS),
         expand("results/ml/within_oral/{level}/cv_metrics.csv",  level=LEVELS),
@@ -562,22 +575,29 @@ rule qc_targeted_level:
         pca_scatter= "results/qc_targeted/{level}/pca_permanova/pca_scatter.png",
         permanova  = "results/qc_targeted/{level}/pca_permanova/permanova.tsv"
     params:
-        outdir = "results/qc_targeted",
-        level  = lambda w: w.level,
-        topk   = 12
+        outdir        = "results/qc_targeted",
+        level         = lambda w: w.level,
+        # cap اختیاری است؛ اگر نخواهی می‌توانی حذفش کنی و از پیش‌فرض اسکریپت (30) استفاده شود
+        cap           = cfg("qc_cap", 30),
+        ppi_metric    = cfg("qc_ppi_metric", "none"),
+        ppi_thr       = cfg("qc_ppi_thresh", 0.10),
+        annotate_flag = ("--annotate-ppi" if cfg("qc_annotate_ppi", True) else "")
     shell:
         r"""
         python {SCRIPTS_DIR}/qc_targeted.py \
-            --pct-all {input.pct_all} \
-            --meta    {input.meta} \
-            --ppi-effects-all {input.ppi_all} \
-            --pairs   {input.pairs} \
-            --rank    {params.level} \
-            --outdir  {params.outdir} \
-            --topk    {params.topk} \
-            --with-pca-permanova
+          --pct-all {input.pct_all} \
+          --meta    {input.meta} \
+          --ppi-effects-all {input.ppi_all} \
+          --pairs   {input.pairs} \
+          --rank    {params.level} \
+          --outdir  {params.outdir} \
+          --cap     {params.cap} \
+          --ppi-filter-metric {params.ppi_metric} \
+          --ppi-filter-thresh {params.ppi_thr} \
+          {params.annotate_flag} \
+          --with-pca-permanova
 
-        # Sanity checks
+        # sanity checks
         test -f {output.top}
         test -f {output.box_o}
         test -f {output.box_f}
@@ -591,11 +611,19 @@ rule qc_targeted_level:
 
 rule qc_targeted:
     input:
-        qc_targets()
+        expand("results/qc_targeted/{level}/top_taxa_selected.csv",         level=LEVELS),
+        expand("results/qc_targeted/{level}/box_by_ppi_oral.png",           level=LEVELS),
+        expand("results/qc_targeted/{level}/box_by_ppi_fecal.png",          level=LEVELS),
+        expand("results/qc_targeted/{level}/interaction_means.png",         level=LEVELS),
+        expand("results/qc_targeted/{level}/paired_spaghetti_crohn.png",    level=LEVELS),
+        expand("results/qc_targeted/{level}/density_top_taxa_oral.png",     level=LEVELS),
+        expand("results/qc_targeted/{level}/density_top_taxa_fecal.png",    level=LEVELS),
+        expand("results/qc_targeted/{level}/pca_permanova/pca_scatter.png", level=LEVELS),
+        expand("results/qc_targeted/{level}/pca_permanova/permanova.tsv",   level=LEVELS)
 
 rule qc_targeted_one:
     input:
-        lambda wildcards: [
+        [
             f"results/qc_targeted/{config.get('level')}/top_taxa_selected.csv",
             f"results/qc_targeted/{config.get('level')}/box_by_ppi_oral.png",
             f"results/qc_targeted/{config.get('level')}/box_by_ppi_fecal.png",
