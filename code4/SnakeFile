@@ -67,60 +67,31 @@ CONFIG_COLORS_YAML = "config/colors.yml"
 
 # ---------------- Taxa-compare (per-rank) ----------------
 TAXA_OUTDIR = "results/taxa_compare"
+TAXA_TOPK   = 15
 
-TC = config.get("taxa_compare", {})
-TAXA_TOPK = TC.get("topk", 15)
-TC_HEAT   = TC.get("heat_topk", 15)
-
-# New: pull all thresholds/toggles with sensible defaults
-TC_PREV       = TC.get("prevalence_threshold", TC.get("presence_pct", 0.40))
-TC_MIN_MEAN   = TC.get("min_mean_pct", 0.01)
-TC_EFFSIZE    = TC.get("effect_size_threshold", 0.4)
-TC_MAX_ROWS   = TC.get("max_rows", None)              # None / null → no cap
-TC_EMIT_PAGES = TC.get("emit_legacy_pages", False)
-
-# Files that the script actually writes
-# NOTE:
-# - keep only one unpaired heatmap per site (no _topXX variant)
-# - keep paired "top" as a parameterized _top{heatk}.png
 _TAXA_FILES = [
     # tables
     "group_means_{rank}.csv",
     "group_deltas_{rank}.csv",
-    "pct_oral_crohn.csv", "pct_oral_healthy.csv",
-    "pct_fecal_crohn.csv", "pct_fecal_healthy.csv",
-    "pct_all.csv",
-
-    # lollipop plots over ALL common taxa (single page)
-    "lollipop_ORAL_OC_minus_OH_{rank}_ALL.png",
-    "lollipop_FECAL_FC_minus_FH_{rank}_ALL.png",
-    # per-sample stacked bars (filename includes _top{topk})
-    "bars_by_sample_oral_crohn_{rank}_top{topk}.png",
-    "bars_by_sample_oral_healthy_{rank}_top{topk}.png",
-    "bars_by_sample_fecal_crohn_{rank}_top{topk}.png",
-    "bars_by_sample_fecal_healthy_{rank}_top{topk}.png",
-    "bars_groupmeans_oral_CH_{rank}_top{topk}.png",
-    "bars_groupmeans_fecal_CH_{rank}_top{topk}.png",
-
-
-    # paired / unpaired heatmaps
-    "heatmap_pairs_crohn_{rank}.png",
-    "heatmap_oral_CH_unpaired_{rank}.png",
-    "heatmap_fecal_CH_unpaired_{rank}.png"
+    "pct_oral_crohn.csv","pct_oral_healthy.csv","pct_fecal_crohn.csv","pct_fecal_healthy.csv","pct_all.csv",
+    # plots
+    "heatmap_group_means_{rank}.png",
+    "heatmap_group_deltas_{rank}.png",
+    "heatmap_pairs_crohn_{rank}.png","heatmap_pairs_crohn_{rank}_top15.png",
+    "heatmap_oral_CH_unpaired_{rank}.png","heatmap_oral_CH_unpaired_{rank}_top15.png",
+    "heatmap_fecal_CH_unpaired_{rank}.png","heatmap_fecal_CH_unpaired_{rank}_top15.png",
+    "barplot_oral_{rank}_top{topk}.png","barplot_fecal_{rank}_top{topk}.png",
 ]
 
-# Wildcard-templated outputs for the per-level rule (keep {level} as a Snakemake wildcard)
+# Wildcard templated outputs (for rule taxa_compare_level)
 TAXA_FILES_TEMPL = [
-    f"{TAXA_OUTDIR}/{{level}}/" +
-    fn.replace("{rank}", "{level}") \
-      .replace("{topk}",  str(TAXA_TOPK)) \
-      .replace("{heatk}", str(TC_HEAT))
+    f"{TAXA_OUTDIR}/{{level}}/" + fn.replace("{rank}", "{level}").replace("{topk}", str(TAXA_TOPK))
     for fn in _TAXA_FILES
 ]
 
-# Concrete list for rule all (materialize for each level)
+# Concrete list for rule all (materialized for each level)
 TAXA_CORE_OUTPUTS = [
-    f"{TAXA_OUTDIR}/{rank}/" + fn.format(rank=rank, topk=TAXA_TOPK, heatk=TC_HEAT)
+    f"{TAXA_OUTDIR}/{rank}/" + fn.format(rank=rank, topk=TAXA_TOPK)
     for rank in LEVELS for fn in _TAXA_FILES
 ]
 
@@ -403,16 +374,9 @@ rule taxa_compare_level:
     output:
         TAXA_FILES_TEMPL
     params:
-        outdir      = TAXA_OUTDIR,
-        topk        = TAXA_TOPK,
-        heat_topk   = TC_HEAT,
-        prevalence  = TC_PREV,          # e.g. 0.50
-        min_mean    = TC_MIN_MEAN,      # e.g. 0.1  (percentage points)
-        effect_size = TC_EFFSIZE,       # e.g. 0.50 (percentage points)
-        # pass 0 when config is null/None so script interprets as "no cap"
-        max_rows    = (0 if TC_MAX_ROWS in (None, "None", "null") else TC_MAX_ROWS),
-        pairs_csv   = config.get("paths", {}).get("pairs", "data/processed/matched_sample_ids.csv"),
-        emit_flag   = ("--emit-legacy-pages" if TC_EMIT_PAGES else "")
+        outdir     = TAXA_OUTDIR,
+        topk       = TAXA_TOPK,
+        heat_topk  = 15
     shell:
         r"""
         python {input.script} \
@@ -422,13 +386,9 @@ rule taxa_compare_level:
           --fecal-healthy {input.fh} \
           --outdir        {params.outdir} \
           --topk          {params.topk} \
-          --heat-topk     {params.heat_topk} \
-          --presence-threshold    {params.prevalence} \
-          --min-mean-pct          {params.min_mean} \
-          --effect-size-threshold {params.effect_size} \
-          --max-rows              {params.max_rows} \
-          --pairs-csv             {params.pairs_csv} \
-          {params.emit_flag}
+          --presence-threshold 0.2 \
+          --pairs-csv data/processed/matched_sample_ids.csv \
+          --heat-topk     {params.heat_topk}
         """
 
 rule taxa_compare:

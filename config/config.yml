@@ -75,6 +75,21 @@ alpha_beta:
   pseudocount: 1.0e-6
   permutations: 999
 
+# ---------- Taxa comparison ----------
+taxa_compare:
+  # visualization/selection controls
+  prevalence_threshold: 0.50      # require presence in >=20% of samples in EACH group
+  min_mean_pct: 0.1              # drop taxa with overall mean < 0.01 percentage points
+  effect_size_threshold: 0.50     # keep taxa with |Δ mean %| >= 0.20; set 0 to disable
+  max_rows: null                  # null = show ALL after filters; or put an integer cap (e.g., 40)
+
+  # compact titles/labels elsewhere
+  topk: 15
+  heat_topk: 15
+
+  # legacy (multi-page) figures toggle
+  emit_legacy_pages: false        # set true only if you want the old paginated outputs
+
 # ---------- DA controls (kept for completeness; Snakefile uses global volcano_*) ----------
 da:
   volcano_metric: "q"
@@ -83,10 +98,10 @@ da:
 
 # ---------- PPI interaction plot controls (align with DA) ----------
 ppi:
-  volcano_metric: "q"
-  volcano_alpha: 0.10
+  volcano_metric: "p"   # or "q"
+  volcano_alpha: 0.05   # for q use 0.10
   heat_topk: 12
-
+  robust_hc3: true
 # ---------- ML settings (these keys are read directly by Snakefile) ----------
 ml_model: "logit_enet"     # e.g., "logit_enet", "rf", "xgb"
 ml_outer_folds: 5

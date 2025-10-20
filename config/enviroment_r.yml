@@ -1,0 +1,15 @@
+name: microbiome_r
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - r-base=4.5.*
+  - r-tidyverse=2.*         # ggplot2, dplyr, readr, tidyr, stringr, purrr, ...
+  - r-broom=1.*
+  - r-sandwich=3.*
+  - r-lmtest=0.*
+  - r-effsize=0.*
+  - r-vegan=2.7.*
+  - r-ape=5.8.*
+  - bioconductor-phyloseq
