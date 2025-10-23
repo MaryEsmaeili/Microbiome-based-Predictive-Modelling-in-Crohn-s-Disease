@@ -189,6 +189,16 @@ def qc_targets():
             ]
     return files
 
+
+
+MODELS = ["logit", "svm", "rf", "xgb"]
+
+ML_TARGET = "disease"                        # "disease" | "ppi" | "responder"
+ML_OUTER  = 3                                # outer folds (nested CV)
+ML_INNER  = 3                                # inner folds (hyperparam CV)
+ML_COVARS = "Age,BMI,Sex,Smoking,PPI_use"    # Covariates
+ML_TRAIN  = f"{SCRIPTS_DIR}/ml/train.py"
+
 # ---------------- Default target: full pipeline ----------------
 rule all:
     input:
@@ -220,13 +230,71 @@ rule all:
             expand("results/qc_targeted/{level}/permanova.tsv",           level=LEVELS)
             if RUN_PCA_PERMANOVA else []
         ),
-        # ML (within-site & transfer; oral preserved)
-        expand("results/ml/within_fecal/{level}/cv_metrics.csv", level=LEVELS),
-        expand("results/ml/within_oral/{level}/cv_metrics.csv",  level=LEVELS),
-        expand("results/ml/transfer_f2o/{level}/metrics.csv",    level=LEVELS),
+############################################
+# --------- ML targets & config -----------
+############################################
 
-        # Learning curves (fecal; optional example)
-        expand("results/ml/learning/{level}_fecal/learning_curve.csv", level=LEVELS)
+
+
+        # WITHIN — FECAL
+        expand("results/ml/within_fecal/{model}/{level}/cv_metrics.csv",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/within_fecal/{model}/{level}/roc.png",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/within_fecal/{model}/{level}/pr.png",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/within_fecal/{model}/{level}/calibration.png",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/within_fecal/{model}/{level}/importances.csv",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/within_fecal/{model}/{level}/learning_curve.csv",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/within_fecal/{model}/{level}/learning_curve.png",
+               model=MODELS, level=LEVELS),
+
+        # WITHIN — ORAL
+        expand("results/ml/within_oral/{model}/{level}/cv_metrics.csv",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/within_oral/{model}/{level}/roc.png",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/within_oral/{model}/{level}/pr.png",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/within_oral/{model}/{level}/calibration.png",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/within_oral/{model}/{level}/importances.csv",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/within_oral/{model}/{level}/learning_curve.csv",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/within_oral/{model}/{level}/learning_curve.png",
+               model=MODELS, level=LEVELS),
+
+        # TRANSFER — Fecal → Oral (external test)
+        expand("results/ml/transfer_f2o/{model}/{level}/trainCV/cv_metrics.csv",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/transfer_f2o/{model}/{level}/external_roc.png",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/transfer_f2o/{model}/{level}/external_pr.png",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/transfer_f2o/{model}/{level}/external_calibration.png",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/transfer_f2o/{model}/{level}/external_predictions.csv",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/transfer_f2o/{model}/{level}/features_used.txt",
+               model=MODELS, level=LEVELS),
+
+        # TRANSFER-PAIRED — Fecal → Oral 
+        expand("results/ml/transfer_paired_f2o/{model}/{level}/trainCV/cv_metrics.csv",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/transfer_paired_f2o/{model}/{level}/external_roc.png",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/transfer_paired_f2o/{model}/{level}/external_pr.png",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/transfer_paired_f2o/{model}/{level}/external_calibration.png",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/transfer_paired_f2o/{model}/{level}/external_predictions.csv",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/transfer_paired_f2o/{model}/{level}/features_used.txt",
+               model=MODELS, level=LEVELS)
 
 # =================== 1) PREPROCESSING ===================
 rule preprocessing:
@@ -666,142 +734,217 @@ rule report_da_ppi_qc:
           --out results/da_ppi_qc/summary.md
         """
 
-# =================== 11) ML (constants + rules) ===================
-ML_MODEL = "logit_enet"
-ML_FOLDS = 3
-ML_INNER = 3
-ML_SEED  = 42
-ML_GROUP = "subject_id"
+# # =================== 11) ML (constants + rules) ===================
+############################################
+# --------- ML rules (within/transfer) ----
+############################################
 
+# برای جلوگیری از تایپِ تکراری
+def taxa_pct(wildcards):
+    return f"{TAXA_OUTDIR}/{wildcards.level}/pct_all.csv"
+
+wildcard_constraints:
+    # فقط همین چهار نام به‌عنوان مدل پذیرفته می‌شوند
+    model="|".join(MODELS)
+
+# --------- WITHIN-SITE: FECAL ---------
 rule ml_within_fecal_level:
     input:
-        pct   = lambda w: f"{TAXA_OUTDIR}/{w.level}/pct_all.csv",
-        meta  = MODEL_TABLE_POOLED,
-        pairs = MATCHED_IDS_OUT
+        pct  = taxa_pct,
+        meta = MODEL_TABLE_POOLED
     output:
-        cv     = "results/ml/within_fecal/{level}/cv_metrics.csv",
-        roc    = "results/ml/within_fecal/{level}/roc_pr.png",
-        folds  = "results/ml/within_fecal/{level}/cv_folds.png",
-        imps   = "results/ml/within_fecal/{level}/importances.csv"
+        cv     = "results/ml/within_fecal/{model}/{level}/cv_metrics.csv",
+        roc    = "results/ml/within_fecal/{model}/{level}/roc.png",
+        pr     = "results/ml/within_fecal/{model}/{level}/pr.png",
+        calib  = "results/ml/within_fecal/{model}/{level}/calibration.png",
+        imps   = "results/ml/within_fecal/{model}/{level}/importances.csv",
+        lc_csv = "results/ml/within_fecal/{model}/{level}/learning_curve.csv",
+        lc_png = "results/ml/within_fecal/{model}/{level}/learning_curve.png"
     params:
-        outdir = lambda w: f"results/ml/within_fecal/{w.level}",
-        level  = lambda w: w.level
+        outdir = "results/ml/within_fecal/{model}/{level}"
     shell:
         r"""
-        python -m scripts.ml.train within \
-          --pct-all {input.pct} \
-          --meta    {input.meta} \
-          --site    fecal \
-          --rank    {params.level} \
-          --model   {ML_MODEL} \
-          --folds   {ML_FOLDS} --inner-folds {ML_INNER} \
-          --group-col {ML_GROUP} \
-          --pairs   {input.pairs} \
-          --random-state {ML_SEED} \
-          --outdir  {params.outdir}
+        python {ML_TRAIN} within \
+          --taxa {input.pct} \
+          --meta {input.meta} \
+          --site fecal \
+          --rank {wildcards.level} \
+          --target {ML_TARGET} \
+          --model {wildcards.model} \
+          --add-covars "{ML_COVARS}" \
+          --sample-id-col Sample_ID \
+          --outdir {params.outdir} \
+          --outer {ML_OUTER} --inner {ML_INNER} \
+          --learningcurve
         """
 
+# --------- WITHIN-SITE: ORAL ---------
 rule ml_within_oral_level:
     input:
-        pct   = lambda w: f"{TAXA_OUTDIR}/{w.level}/pct_all.csv",
-        meta  = MODEL_TABLE_POOLED,
-        pairs = MATCHED_IDS_OUT
+        pct  = taxa_pct,
+        meta = MODEL_TABLE_POOLED
     output:
-        cv     = "results/ml/within_oral/{level}/cv_metrics.csv",
-        roc    = "results/ml/within_oral/{level}/roc_pr.png",
-        folds  = "results/ml/within_oral/{level}/cv_folds.png",
-        imps   = "results/ml/within_oral/{level}/importances.csv"
+        cv     = "results/ml/within_oral/{model}/{level}/cv_metrics.csv",
+        roc    = "results/ml/within_oral/{model}/{level}/roc.png",
+        pr     = "results/ml/within_oral/{model}/{level}/pr.png",
+        calib  = "results/ml/within_oral/{model}/{level}/calibration.png",
+        imps   = "results/ml/within_oral/{model}/{level}/importances.csv",
+        lc_csv = "results/ml/within_oral/{model}/{level}/learning_curve.csv",
+        lc_png = "results/ml/within_oral/{model}/{level}/learning_curve.png"
     params:
-        outdir = lambda w: f"results/ml/within_oral/{w.level}",
-        level  = lambda w: w.level
+        outdir = "results/ml/within_oral/{model}/{level}"
     shell:
         r"""
-        python -m scripts.ml.train within \
-          --pct-all {input.pct} \
-          --meta    {input.meta} \
-          --site    oral \
-          --rank    {params.level} \
-          --model   {ML_MODEL} \
-          --folds   {ML_FOLDS} --inner-folds {ML_INNER} \
-          --group-col {ML_GROUP} \
-          --pairs   {input.pairs} \
-          --random-state {ML_SEED} \
-          --outdir  {params.outdir}
+        python {ML_TRAIN} within \
+          --taxa {input.pct} \
+          --meta {input.meta} \
+          --site oral \
+          --rank {wildcards.level} \
+          --target {ML_TARGET} \
+          --model {wildcards.model} \
+          --add-covars "{ML_COVARS}" \
+          --sample-id-col Sample_ID \
+          --outdir {params.outdir} \
+          --outer {ML_OUTER} --inner {ML_INNER} \
+          --learningcurve
         """
 
+# --------- TRANSFER: Fecal → Oral (external test) ---------
 rule ml_transfer_f2o_level:
     input:
-        pct   = lambda w: f"{TAXA_OUTDIR}/{w.level}/pct_all.csv",
-        meta  = MODEL_TABLE_POOLED,
-        pairs = MATCHED_IDS_OUT
+        pct  = taxa_pct,
+        meta = MODEL_TABLE_POOLED
     output:
-        metrics = "results/ml/transfer_f2o/{level}/metrics.csv",
-        roc     = "results/ml/transfer_f2o/{level}/roc_pr.png"
+        train_cv = touch("results/ml/transfer_f2o/{model}/{level}/trainCV/cv_metrics.csv"),
+        roc      = "results/ml/transfer_f2o/{model}/{level}/external_roc.png",
+        pr       = "results/ml/transfer_f2o/{model}/{level}/external_pr.png",
+        calib    = "results/ml/transfer_f2o/{model}/{level}/external_calibration.png",
+        preds    = "results/ml/transfer_f2o/{model}/{level}/external_predictions.csv",
+        feats    = "results/ml/transfer_f2o/{model}/{level}/features_used.txt"
     params:
-        outdir = lambda w: f"results/ml/transfer_f2o/{w.level}",
-        level  = lambda w: w.level
+        outdir = "results/ml/transfer_f2o/{model}/{level}"
     shell:
         r"""
-        python -m scripts.ml.train transfer \
-          --pct-all {input.pct} \
-          --meta    {input.meta} \
+        python {ML_TRAIN} transfer \
+          --taxa {input.pct} \
+          --meta {input.meta} \
           --train-site fecal \
           --test-site  oral \
-          --rank    {params.level} \
-          --model   {ML_MODEL} \
-          --group-col {ML_GROUP} \
-          --pairs   {input.pairs} \
-          --disjoint-drop train \
-          --feature-mode intersection \
-          --random-state {ML_SEED} \
-          --outdir  {params.outdir}
+          --rank {wildcards.level} \
+          --target {ML_TARGET} \
+          --model {wildcards.model} \
+          --add-covars "{ML_COVARS}" \
+          --sample-id-col Sample_ID \
+          --outdir {params.outdir} \
+          --outer {ML_OUTER} --inner {ML_INNER}
         """
 
+# --------- TRANSFER-PAIRED: Fecal → Oral (خروجی مجزا) ---------
+# در train.py اگر ستون subject_id داخل meta باشد، در external_predictions.csv ذخیره می‌شود.
 rule ml_transfer_paired_f2o_level:
     input:
-        pct   = lambda w: f"{TAXA_OUTDIR}/{w.level}/pct_all.csv",
-        meta  = MODEL_TABLE_POOLED,
-        pairs = MATCHED_IDS_OUT
+        pct  = taxa_pct,
+        meta = MODEL_TABLE_POOLED
     output:
-        metrics  = "results/ml/transfer_paired_f2o/{level}/metrics.csv",
-        roc      = "results/ml/transfer_paired_f2o/{level}/roc_pr.png",
-        per_sub  = "results/ml/transfer_paired_f2o/{level}/per_subject.csv",
-        preds    = "results/ml/transfer_paired_f2o/{level}/preds.csv"
+        train_cv = touch("results/ml/transfer_paired_f2o/{model}/{level}/trainCV/cv_metrics.csv"),
+        roc      = "results/ml/transfer_paired_f2o/{model}/{level}/external_roc.png",
+        pr       = "results/ml/transfer_paired_f2o/{model}/{level}/external_pr.png",
+        calib    = "results/ml/transfer_paired_f2o/{model}/{level}/external_calibration.png",
+        preds    = "results/ml/transfer_paired_f2o/{model}/{level}/external_predictions.csv",
+        feats    = "results/ml/transfer_paired_f2o/{model}/{level}/features_used.txt"
     params:
-        outdir = lambda w: f"results/ml/transfer_paired_f2o/{w.level}",
-        level  = lambda w: w.level
+        outdir = "results/ml/transfer_paired_f2o/{model}/{level}"
     shell:
         r"""
-        python -m scripts.ml.train paired_transfer \
-          --pct-all {input.pct} \
-          --meta    {input.meta} \
-          --pairs   {input.pairs} \
-          --rank    {params.level} \
-          --model   {ML_MODEL} \
-          --folds   {ML_FOLDS} --inner-folds {ML_INNER} \
-          --group-col {ML_GROUP} \
-          --random-state {ML_SEED} \
-          --outdir  {params.outdir}
+        python {ML_TRAIN} transfer \
+          --taxa {input.pct} \
+          --meta {input.meta} \
+          --train-site fecal \
+          --test-site  oral \
+          --rank {wildcards.level} \
+          --target {ML_TARGET} \
+          --model {wildcards.model} \
+          --add-covars "{ML_COVARS}" \
+          --sample-id-col Sample_ID \
+          --outdir {params.outdir} \
+          --outer {ML_OUTER} --inner {ML_INNER}
         """
-
-# Aggregated ML stages (no wildcards)
+# =================== ML aggregate wrappers ===================
 rule stage_ml:
     input:
-        # within fecal
-        expand("results/ml/within_fecal/{level}/cv_metrics.csv", level=LEVELS),
-        expand("results/ml/within_fecal/{level}/cv_folds.png",   level=LEVELS),
-        expand("results/ml/within_fecal/{level}/roc_pr.png",     level=LEVELS),
-        expand("results/ml/within_fecal/{level}/importances.csv",level=LEVELS),
-        # within oral
-        expand("results/ml/within_oral/{level}/cv_metrics.csv",  level=LEVELS),
-        expand("results/ml/within_oral/{level}/cv_folds.png",    level=LEVELS),
-        expand("results/ml/within_oral/{level}/roc_pr.png",      level=LEVELS),
-        expand("results/ml/within_oral/{level}/importances.csv", level=LEVELS),
-        # transfer F→O
-        expand("results/ml/transfer_f2o/{level}/metrics.csv",    level=LEVELS),
-        expand("results/ml/transfer_f2o/{level}/roc_pr.png",     level=LEVELS),
-        # paired transfer F→O
-        expand("results/ml/transfer_paired_f2o/{level}/metrics.csv",     level=LEVELS),
-        expand("results/ml/transfer_paired_f2o/{level}/roc_pr.png",      level=LEVELS),
-        expand("results/ml/transfer_paired_f2o/{level}/per_subject.csv", level=LEVELS),
-        expand("results/ml/transfer_paired_f2o/{level}/preds.csv",       level=LEVELS)
+        # WITHIN — FECAL
+        expand("results/ml/within_fecal/{model}/{level}/cv_metrics.csv",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/within_fecal/{model}/{level}/roc.png",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/within_fecal/{model}/{level}/pr.png",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/within_fecal/{model}/{level}/calibration.png",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/within_fecal/{model}/{level}/importances.csv",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/within_fecal/{model}/{level}/learning_curve.csv",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/within_fecal/{model}/{level}/learning_curve.png",
+               model=MODELS, level=LEVELS),
+
+        # WITHIN — ORAL
+        expand("results/ml/within_oral/{model}/{level}/cv_metrics.csv",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/within_oral/{model}/{level}/roc.png",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/within_oral/{model}/{level}/pr.png",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/within_oral/{model}/{level}/calibration.png",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/within_oral/{model}/{level}/importances.csv",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/within_oral/{model}/{level}/learning_curve.csv",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/within_oral/{model}/{level}/learning_curve.png",
+               model=MODELS, level=LEVELS),
+
+        # TRANSFER — Fecal → Oral
+        expand("results/ml/transfer_f2o/{model}/{level}/trainCV/cv_metrics.csv",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/transfer_f2o/{model}/{level}/external_roc.png",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/transfer_f2o/{model}/{level}/external_pr.png",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/transfer_f2o/{model}/{level}/external_calibration.png",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/transfer_f2o/{model}/{level}/external_predictions.csv",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/transfer_f2o/{model}/{level}/features_used.txt",
+               model=MODELS, level=LEVELS),
+
+        # TRANSFER-PAIRED — Fecal → Oral
+        expand("results/ml/transfer_paired_f2o/{model}/{level}/trainCV/cv_metrics.csv",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/transfer_paired_f2o/{model}/{level}/external_roc.png",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/transfer_paired_f2o/{model}/{level}/external_pr.png",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/transfer_paired_f2o/{model}/{level}/external_calibration.png",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/transfer_paired_f2o/{model}/{level}/external_predictions.csv",
+               model=MODELS, level=LEVELS),
+        expand("results/ml/transfer_paired_f2o/{model}/{level}/features_used.txt",
+               model=MODELS, level=LEVELS)
+# rule stage_ml_one_level:
+#     input:
+#         expand("results/ml/within_fecal/{model}/"        + f"{'{config[level]}'}/cv_metrics.csv", model=MODELS),
+#         expand("results/ml/within_oral/{model}/"         + f"{'{config[level]}'}/cv_metrics.csv", model=MODELS),
+#         expand("results/ml/transfer_f2o/{model}/"        + f"{'{config[level]}'}/external_roc.png", model=MODELS),
+#         expand("results/ml/transfer_paired_f2o/{model}/" + f"{'{config[level]}'}/external_roc.png", model=MODELS)
+
+# rule stage_ml_one_model:
+#     input:
+#         expand("results/ml/within_fecal/{model}/{level}/cv_metrics.csv",
+#                model=[config.get("model")], level=LEVELS),
+#         expand("results/ml/within_oral/{model}/{level}/cv_metrics.csv",
+#                model=[config.get("model")], level=LEVELS),
+#         expand("results/ml/transfer_f2o/{model}/{level}/external_roc.png",
+#                model=[config.get("model")], level=LEVELS),
+#         expand("results/ml/transfer_paired_f2o/{model}/{level}/external_roc.png",
+#                model=[config.get("model")], level=LEVELS)

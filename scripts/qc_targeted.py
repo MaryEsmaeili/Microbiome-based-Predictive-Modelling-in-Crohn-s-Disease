@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
+import re
 import os, argparse, warnings
 from typing import Optional, List, Tuple, Dict
 import numpy as np
@@ -309,10 +309,26 @@ def main():
     long = long.merge(meta.rename(columns={"sample_id":"Sample_ID"}), on="Sample_ID", how="left")
 
     # ---- helpers
+    def _clean_taxon_label(t: str, rank: str) -> str:
+        lab = str(t)
+        # 1) هر پرانتزی که اشاره به disease:ppi_use دارد را حذف کن
+        lab = re.sub(r"\s*\([^)]*?disease\s*:\s*ppi_use[^)]*\)\s*", "", lab, flags=re.IGNORECASE)
+        # 2) هر براکتی که اشاره به ppi دارد را هم حذف کن (برای اطمینان)
+        lab = re.sub(r"\s*\[[^\]]*?ppi[^\]]*\]\s*", "", lab, flags=re.IGNORECASE)
+        # 3) برای species پیشوند s__ را بردار
+        if rank == "species":
+            lab = re.sub(r"^s__", "", lab)
+        return lab
+
     def label_with_ppi(t: str) -> str:
-        if (not args.annotate_ppi) or (t not in ppi_terms_map):
-            return t
-        return f"{t} [{ppi_terms_map[t]}]"
+        base = _clean_taxon_label(t, args.rank)
+        term = ppi_terms_map.get(str(t))
+        # اگر annotate روشن است و term وجود دارد اما به PPI اشاره نمی‌کند، در براکت اضافه کن
+        if args.annotate_ppi and term and not re.search(r"ppi", str(term), flags=re.IGNORECASE):
+            return f"{base} [{term}]"
+        # در غیر این صورت همان base کافی است
+        return base
+
 
     # ---- PCA & PERMANOVA
     if args.with_pca_permanova:
