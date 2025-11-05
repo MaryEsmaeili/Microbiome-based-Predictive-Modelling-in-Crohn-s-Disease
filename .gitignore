@@ -5,5 +5,5 @@ results/
 
 # Ignore the Miniconda installer
 Miniconda3-latest-MacOSX-arm64.sh
-
+scripts/clean_hmp_oral.py
 .DS_Store

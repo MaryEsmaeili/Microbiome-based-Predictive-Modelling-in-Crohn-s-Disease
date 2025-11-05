@@ -1,0 +1,77 @@
+project_name: "oral_microbiome_all_in_one"
+
+raw_inputs:
+  metadata_xlsx:     "data/Metadata_metagenomics.xlsx"
+  crohn_merged_tsv:  "data/utrecht_metaphlan_merged.txt"
+  healthy_oral_tsv:  "data/oral_only_results_metaphlan4.txt"
+  healthy_fecal_tsv: "data/fecal_only_results_metaphlan4.txt"
+  hmp_oral_csv:      "data/HMP_oral_metaphlan_species_table.csv"
+
+preprocessed:
+  oral_crohn:    "data/processed/oral_abund_crohn.csv"
+  fecal_crohn:   "data/processed/fecal_abund_crohn.csv"
+  oral_healthy:  "data/processed/oral_abund_healthy.csv"
+  fecal_healthy: "data/processed/fecal_abund_healthy.csv"
+  hmp_oral:      "data/processed/hmporal.csv"
+  matched_pairs: "data/processed/matched_pairs.csv"
+
+filtered:
+  oral_norm:          "data/filtered/oral_abund_crohn_filtered_normalized.csv"
+  fecal_norm:         "data/filtered/fecal_abund_crohn_filtered_normalized.csv"
+  oral_healthy_norm:  "data/filtered/oral_abund_healthy_filtered_normalized.csv"
+  fecal_healthy_norm: "data/filtered/fecal_abund_healthy_filtered_normalized.csv"
+
+colors_yaml: "config/colors.yml"
+
+filtering:
+  level: "species"
+  agg: "mean"
+  prevalence_oral:  0.20
+  prevalence_fecal: 0.20
+  abundance_percent_min: 0.10
+  mean_on_positives: false
+
+alpha:
+  levels: ["species", "genus"]
+
+  scenarios:
+    merged: true
+    previous: true
+
+  covars_path: "data/meta/model_table_pooled.csv"
+
+taxa_compare:
+  script: "scripts/taxa_comparison.py"
+  outdir: "results/taxa_compare"
+  topk: 15
+  heat_topk: 20
+  presence_threshold: 0.40        # 0 تا 1 (فراوانی غیرصفر در هر گروه)
+  min_mean_pct: 0.10              # فیلتر میانگین ٪ (pp) روی همه‌ی نمونه‌ها
+  effect_size_threshold: 0.40     # آستانه |Δ mean %| (pp)
+  max_rows: null                 # یا یک عدد مثل 60
+  emit_legacy_pages: false       # true اگر صفحات چندگانه‌ی قدیمی هم بخوای
+inputs:
+  oral_crohn:    "data/processed/oral_abund_crohn.csv"
+  oral_healthy:  "data/processed/oral_abund_healthy_merged_for_alpha.csv"
+  fecal_crohn:   "data/processed/fecal_abund_crohn.csv"
+  fecal_healthy: "data/processed/fecal_abund_healthy.csv"
+  pairs_csv:     "data/processed/matched_pairs.csv"
+
+da:
+  pct_all: "data/processed/da_pct_all.csv"
+  meta: "data/meta/model_table_pooled.csv"         # بیرون از Snakemake تولید می‌شود
+  source_map: "data/processed/da_pct_all_sources.csv" # الزامی
+  pairs: "data/processed/matched_pairs.csv"   # اگر داری
+  deltas: ""      # اگر از قبل داری (بهتر طبق یادداشت 115)
+  outdir: "results/da"
+  alpha: 0.05
+  volcano_metric: "q"
+  heat_topk: 10
+  label_topk: 10
+  paired_min_pairs: 5
+  plot_jitter: 0.0
+
+qc:
+  prevalence: 0.50
+  mean_pct: 0.50
+  cap: 30

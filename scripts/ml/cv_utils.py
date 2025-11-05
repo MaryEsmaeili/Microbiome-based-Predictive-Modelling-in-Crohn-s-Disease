@@ -1,19 +1,20 @@
 # ml/cv_utils.py
 import os
 import math
+from typing import Dict, Any, Tuple, Optional, List
+
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, Tuple, Optional, List
+import matplotlib.pyplot as plt
 
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
-from sklearn.svm import LinearSVC, SVC
+from sklearn.svm import SVC
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import (
     StratifiedKFold, StratifiedGroupKFold, GridSearchCV, learning_curve
 )
-from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import (
     roc_auc_score, average_precision_score, precision_recall_curve,
     roc_curve, brier_score_loss, accuracy_score, balanced_accuracy_score,
@@ -22,101 +23,34 @@ from sklearn.metrics import (
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.calibration import calibration_curve
-import matplotlib.pyplot as plt
-plt.switch_backend("Agg")  # Safe for headless environments
 
+plt.switch_backend("Agg")  # Safe for headless environments (Snakemake)
+
+# Optional XGBoost
 try:
     from xgboost import XGBClassifier
     _HAS_XGB = True
 except Exception:
     _HAS_XGB = False
 
-# -------------------------------
-# Model builders + grids
-# -------------------------------
 
-def build_logit_en() -> Tuple[Pipeline, Dict[str, List[Any]]]:
-    """Logistic regression with elastic-net and standardization."""
-    pipe = Pipeline([
-        ("scaler", StandardScaler(with_mean=True, with_std=True)),
-       ("clf", LogisticRegression(
-           solver="saga",
-           penalty="elasticnet",
-           l1_ratio=0.5,
-           max_iter=5000,
-           n_jobs=-1
-       ))        
-        
-    ])
-    grid = {
-        "clf__C": [0.01, 0.1, 1.0, 10.0],
-        "clf__l1_ratio": [0.1, 0.5, 0.9]
-    }
-    return pipe, grid
+# ---------------------------------------------------------------------
+# Model builders + grids (core entry point: get_model_and_grid)
+# ---------------------------------------------------------------------
 
-def build_svm_linear() -> Tuple[Pipeline, Dict[str, List[Any]]]:
+def get_model_and_grid(model_name: str) -> Tuple[Pipeline, List[Dict[str, List[Any]]]]:
     """
-    Linear SVM wrapped via probability calibration by using SVC(kernel='linear', probability=True).
-    Note: Using SVC (not LinearSVC) to obtain calibrated probabilities directly.
-    """
-    pipe = Pipeline([
-        ("scaler", StandardScaler(with_mean=True, with_std=True)),
-        ("clf", SVC(kernel="linear", probability=True))
-    ])
-    grid = {
-        "clf__C": [0.01, 0.1, 1.0, 10.0]
-    }
-    return pipe, grid
+    Return (pipeline, param_grid_list) for model_name in {"logit","svm","rf","xgb"}.
 
-def build_random_forest() -> Tuple[Pipeline, Dict[str, List[Any]]]:
-    pipe = Pipeline([
-        ("clf", RandomForestClassifier(n_estimators=500, n_jobs=-1, class_weight="balanced", random_state=42))
-    ])
-    grid = {
-        "clf__max_depth": [None, 5, 10, 20],
-        "clf__min_samples_leaf": [1, 2, 5]
-    }
-    return pipe, grid
-
-def build_xgb() -> Tuple[Pipeline, Dict[str, List[Any]]]:
+    - All models wrapped in a Pipeline with steps:
+          prep -> clf
+    - 'prep' does robust numeric impute + scaling on ALL columns.
+      (برای میکروبیوم که CLR شده، این فقط نرمال‌سازی واحدهاست)
     """
-    XGBoost classifier if available. Keep conservative defaults for small-N, high-P.
-    """
-    if not HAVE_XGB:
-        raise RuntimeError("XGBoost not available in the environment.")
-    pipe = Pipeline([
-        ("clf", XGBClassifier(
-            n_estimators=400,
-            learning_rate=0.05,
-            subsample=0.8,
-            colsample_bytree=0.7,
-            max_depth=3,
-            reg_lambda=1.0,
-            reg_alpha=0.0,
-            objective="binary:logistic",
-            n_jobs=-1,
-            eval_metric="logloss",
-            random_state=42
-        ))
-    ])
-    grid = {
-        "clf__max_depth": [2, 3, 4],
-        "clf__reg_lambda": [0.1, 1.0, 10.0],
-        "clf__reg_alpha": [0.0, 0.5, 1.0]
-    }
-    return pipe, grid
-
-
-def get_model_and_grid(model_name: str):
-    """
-    Return (pipeline, param_grid) for model_name in {"logit","svm","rf","xgb"}.
-    We always wrap the estimator into a Pipeline with a 'clf' step so the rest of the
-    code can uniformly access best.named_steps['clf'].
-    """
-    # simple numeric preprocessor (impute + optional scale). For trees, scaling won't matter.
+    # numeric-only preprocessor
     numeric = Pipeline(steps=[
         ("imputer", SimpleImputer(strategy="median")),
-        # keep StandardScaler so linear / SVM benefit; it won't hurt trees
+        # with_mean=False تا اگر بعداً sparse شد، خطا ندهد
         ("scale", StandardScaler(with_mean=False))
     ])
 
@@ -128,67 +62,110 @@ def get_model_and_grid(model_name: str):
     name = model_name.lower()
 
     if name == "logit":
+        # Elastic-net / L2 logistic regression
         clf = LogisticRegression(
-            solver="saga", max_iter=5000, n_jobs=-1
+            solver="saga",
+            max_iter=5000,
+            n_jobs=-1
         )
-        # Two grids: one for pure L2, one for elastic-net (so l1_ratio is valid only there)
         param_grid = [
-            {"clf__penalty": ["l2"], "clf__C": [0.01, 0.1, 1, 10]},
-            {"clf__penalty": ["elasticnet"], "clf__l1_ratio": [0.0, 0.25, 0.5, 0.75, 1.0],
-             "clf__C": [0.01, 0.1, 1, 10]}
+            # Pure L2
+            {
+                "clf__penalty": ["l2"],
+                "clf__C": [0.01, 0.1, 1.0, 10.0]
+            },
+            # Elastic-net
+            {
+                "clf__penalty": ["elasticnet"],
+                "clf__l1_ratio": [0.1, 0.5, 0.9],
+                "clf__C": [0.01, 0.1, 1.0, 10.0]
+            }
         ]
 
     elif name == "svm":
+        # Kernel SVM با احتمال
         clf = SVC(probability=True)
-        param_grid = {
-            "clf__C": [0.1, 1, 10],
-            "clf__kernel": ["rbf", "linear"],
-            "clf__gamma": ["scale", "auto"]
-        }
+        param_grid = [
+            {
+                "clf__kernel": ["linear"],
+                "clf__C": [0.01, 0.1, 1.0, 10.0]
+            },
+            {
+                "clf__kernel": ["rbf"],
+                "clf__C": [0.1, 1.0, 10.0],
+                "clf__gamma": ["scale", "auto"]
+            }
+        ]
 
     elif name == "rf":
-        clf = RandomForestClassifier(random_state=42, n_jobs=-1)
-        param_grid = {
-            "clf__n_estimators": [200, 500],
-            "clf__max_depth": [None, 5, 10],
-            "clf__min_samples_leaf": [1, 2, 4]
-        }
+        clf = RandomForestClassifier(
+            n_estimators=500,
+            random_state=42,
+            n_jobs=-1,
+            class_weight="balanced"
+        )
+        param_grid = [
+            {
+                "clf__max_depth": [None, 5, 10],
+                "clf__min_samples_leaf": [1, 2, 5]
+            }
+        ]
 
     elif name == "xgb":
         if not _HAS_XGB:
-            raise RuntimeError("xgboost is not installed.")
+            raise RuntimeError("xgboost is not installed in this environment.")
         clf = XGBClassifier(
-            eval_metric="logloss",
-            tree_method="hist",
-            random_state=42,
             n_estimators=400,
-            n_jobs=-1
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.7,
+            max_depth=3,
+            reg_lambda=1.0,
+            reg_alpha=0.0,
+            objective="binary:logistic",
+            n_jobs=-1,
+            eval_metric="logloss",
+            random_state=42
         )
-        param_grid = {
-            "clf__max_depth": [3, 5, 7],
-            "clf__learning_rate": [0.01, 0.05, 0.1],
-            "clf__subsample": [0.7, 1.0],
-            "clf__colsample_bytree": [0.7, 1.0],
-            "clf__reg_lambda": [0.0, 1.0]
-        }
+        param_grid = [
+            {
+                "clf__max_depth": [2, 3, 4],
+                "clf__reg_lambda": [0.1, 1.0, 10.0],
+                "clf__reg_alpha": [0.0, 0.5, 1.0]
+            }
+        ]
 
     else:
         raise ValueError(f"Unknown model: {model_name}")
 
-    pipe = Pipeline([("prep", preproc), ("clf", clf)])
+    pipe = Pipeline([
+        ("prep", preproc),
+        ("clf", clf)
+    ])
+    # همیشه لیست از dict می‌دهیم تا با GridSearchCV سازگار باشد
+    if isinstance(param_grid, dict):
+        param_grid = [param_grid]
     return pipe, param_grid
 
-# -------------------------------
-# Plot helpers (publication-ready)
-# -------------------------------
+
+# ---------------------------------------------------------------------
+# Plot helpers
+# ---------------------------------------------------------------------
+
 def _final_estimator(est):
-    # Pipeline? take the 'clf' step (or the last step if unnamed)
+    """Extract final estimator from a sklearn Pipeline if present."""
     if hasattr(est, "named_steps"):
         return est.named_steps.get("clf", list(est.named_steps.values())[-1])
     return est
+
+
 def _decorate(ax, title: str, subtitle: str = ""):
-    ax.set_title(title + ("\n" + subtitle if subtitle else ""), loc="left", fontsize=11)
+    if subtitle:
+        ax.set_title(title + "\n" + subtitle, loc="left", fontsize=11)
+    else:
+        ax.set_title(title, loc="left", fontsize=11)
     ax.grid(True, alpha=0.25)
+
 
 def plot_roc(y_true, y_prob, out_png: str, title: str, subtitle: str):
     fpr, tpr, _ = roc_curve(y_true, y_prob)
@@ -196,7 +173,7 @@ def plot_roc(y_true, y_prob, out_png: str, title: str, subtitle: str):
     fig = plt.figure(figsize=(4.2, 3.6))
     ax = fig.add_subplot(111)
     ax.plot(fpr, tpr, lw=2, label=f"AUC = {auc:.3f}")
-    ax.plot([0,1],[0,1], ls="--", lw=1)
+    ax.plot([0, 1], [0, 1], ls="--", lw=1)
     ax.set_xlabel("False Positive Rate")
     ax.set_ylabel("True Positive Rate")
     ax.legend(loc="lower right")
@@ -204,6 +181,7 @@ def plot_roc(y_true, y_prob, out_png: str, title: str, subtitle: str):
     fig.tight_layout()
     fig.savefig(out_png, dpi=200)
     plt.close(fig)
+
 
 def plot_pr(y_true, y_prob, out_png: str, title: str, subtitle: str):
     prec, rec, _ = precision_recall_curve(y_true, y_prob)
@@ -219,13 +197,16 @@ def plot_pr(y_true, y_prob, out_png: str, title: str, subtitle: str):
     fig.savefig(out_png, dpi=200)
     plt.close(fig)
 
+
 def plot_calibration(y_true, y_prob, out_png: str, title: str, subtitle: str) -> float:
-    prob_true, prob_pred = calibration_curve(y_true, y_prob, n_bins=10, strategy="quantile")
+    prob_true, prob_pred = calibration_curve(
+        y_true, y_prob, n_bins=10, strategy="quantile"
+    )
     brier = brier_score_loss(y_true, y_prob)
     fig = plt.figure(figsize=(4.2, 3.6))
     ax = fig.add_subplot(111)
     ax.plot(prob_pred, prob_true, marker="o", lw=1.5, label=f"Brier = {brier:.3f}")
-    ax.plot([0,1],[0,1], ls="--", lw=1)
+    ax.plot([0, 1], [0, 1], ls="--", lw=1)
     ax.set_xlabel("Predicted probability")
     ax.set_ylabel("Observed frequency")
     ax.legend(loc="upper left")
@@ -234,6 +215,7 @@ def plot_calibration(y_true, y_prob, out_png: str, title: str, subtitle: str) ->
     fig.savefig(out_png, dpi=200)
     plt.close(fig)
     return brier
+
 
 def plot_feature_importance_with_errorbars(
     coef_df: pd.DataFrame, out_png: str, title: str, subtitle: str, top_k: int = 20
@@ -255,9 +237,9 @@ def plot_feature_importance_with_errorbars(
     plt.close(fig)
 
 
-# -------------------------------
-# CV runner
-# -------------------------------
+# ---------------------------------------------------------------------
+# Nested CV
+# ---------------------------------------------------------------------
 
 def nested_cv_evaluate(
     X: pd.DataFrame,
@@ -272,16 +254,35 @@ def nested_cv_evaluate(
 ) -> Dict[str, Any]:
     """
     Perform nested CV with optional group-aware outer splits. Save figures and CSVs.
-    Returns a dict with summary metrics and file paths created.
+
+    Parameters
+    ----------
+    X, y        : features (samples x features), labels (0/1)
+    model_name  : "logit" | "svm" | "rf" | "xgb"
+    outdir      : output directory
+    groups      : optional subject IDs for StratifiedGroupKFold
+    min_pos_per_fold : minimum عدد positive در هر فولد (برای small-n)
+
+    Returns
+    -------
+    dict with paths to metrics and plots.
     """
     os.makedirs(outdir, exist_ok=True)
 
     # Choose splitter
-    if groups is not None and len(groups.unique()) > 1:
-        outer = StratifiedGroupKFold(n_splits=n_splits_outer, shuffle=True, random_state=random_state)
+    if groups is not None and len(pd.Series(groups).unique()) > 1:
+        outer = StratifiedGroupKFold(
+            n_splits=n_splits_outer,
+            shuffle=True,
+            random_state=random_state
+        )
         use_groups = True
     else:
-        outer = StratifiedKFold(n_splits=n_splits_outer, shuffle=True, random_state=random_state)
+        outer = StratifiedKFold(
+            n_splits=n_splits_outer,
+            shuffle=True,
+            random_state=random_state
+        )
         use_groups = False
 
     # Model + grid
@@ -290,26 +291,51 @@ def nested_cv_evaluate(
     # Storage
     fold_rows = []
     oof_prob = pd.Series(index=X.index, dtype=float)
-    per_fold_coefs = []  # list of DataFrames with columns ['feature','weight','fold']
+    per_fold_coefs: List[pd.DataFrame] = []
 
-    for k, (tr, te) in enumerate(outer.split(X, y, groups if use_groups else None), start=1):
+    for k, (tr, te) in enumerate(
+        outer.split(X, y, groups if use_groups else None),
+        start=1
+    ):
         Xtr, Xte = X.iloc[tr], X.iloc[te]
         ytr, yte = y.iloc[tr], y.iloc[te]
 
-        # Class sanity (avoid single-class fold)
-        if ytr.nunique() < 2 or yte.nunique() < 2:
-            # Skip this fold
+        # Skip folds with too few positives/negatives
+        pos_tr = int(ytr.sum())
+        neg_tr = len(ytr) - pos_tr
+        pos_te = int(yte.sum())
+        neg_te = len(yte) - pos_te
+
+        if (
+            ytr.nunique() < 2 or yte.nunique() < 2 or
+            min(pos_tr, neg_tr) < min_pos_per_fold or
+            min(pos_te, neg_te) < 1
+        ):
+            # این فولدها خیلی نامتعادل هستند؛ رد می‌کنیم
             continue
 
-        # Inner grid-search
-        inner = StratifiedKFold(n_splits=n_splits_inner, shuffle=True, random_state=random_state + 13)
-        gscv = GridSearchCV(model, grid, scoring="roc_auc", cv=inner, n_jobs=-1)
+        inner = StratifiedKFold(
+            n_splits=n_splits_inner,
+            shuffle=True,
+            random_state=random_state + 13
+        )
+        gscv = GridSearchCV(
+            model,
+            grid,
+            scoring="roc_auc",
+            cv=inner,
+            n_jobs=-1
+        )
         gscv.fit(Xtr, ytr)
 
         best = gscv.best_estimator_
-        prob = best.predict_proba(Xte)[:, 1] if hasattr(best, "predict_proba") else best.decision_function(Xte)
-        # If decision_function, scale to [0,1] via min-max within fold for comparability
-        if prob.min() < 0 or prob.max() > 1:
+
+        # Probabilities
+        if hasattr(best, "predict_proba"):
+            prob = best.predict_proba(Xte)[:, 1]
+        else:
+            prob = best.decision_function(Xte)
+            # Scale decision_function to [0,1]
             pmin, pmax = prob.min(), prob.max()
             if pmax > pmin:
                 prob = (prob - pmin) / (pmax - pmin)
@@ -317,59 +343,65 @@ def nested_cv_evaluate(
         # Store OOF
         oof_prob.iloc[te] = prob
 
+        # Threshold 0.5 predictions
+        y_pred = (prob >= 0.5).astype(int)
+
         # Metrics
         row = {
             "fold": k,
             "roc_auc": roc_auc_score(yte, prob),
             "ap": average_precision_score(yte, prob),
-            "acc": accuracy_score(yte, (prob >= 0.5).astype(int)),
-            "bal_acc": balanced_accuracy_score(yte, (prob >= 0.5).astype(int)),
-            "precision": precision_score(yte, (prob >= 0.5).astype(int), zero_division=0),
-            "recall": recall_score(yte, (prob >= 0.5).astype(int), zero_division=0),
-            "f1": f1_score(yte, (prob >= 0.5).astype(int), zero_division=0),
+            "acc": accuracy_score(yte, y_pred),
+            "bal_acc": balanced_accuracy_score(yte, y_pred),
+            "precision": precision_score(yte, y_pred, zero_division=0),
+            "recall": recall_score(yte, y_pred, zero_division=0),
+            "f1": f1_score(yte, y_pred, zero_division=0),
+            "n_test": len(yte),
+            "pos_test": int(yte.sum())
         }
         fold_rows.append(row)
 
         # Coefficients / importances per fold
-        feat_names = X.columns.to_list()
-        weights = None
         step = _final_estimator(best)
-        imps = None
+        weights = None
+        feat_names = X.columns.to_list()
         if hasattr(step, "coef_"):
             coefs = step.coef_
             if getattr(coefs, "ndim", 1) == 2:
                 coefs = coefs[0]
-            imps = pd.DataFrame({"feature": X.columns, "weight": coefs})
+            weights = np.asarray(coefs).ravel()
         elif hasattr(step, "feature_importances_"):
-            imps = pd.DataFrame({"feature": X.columns, "weight": step.feature_importances_})
+            weights = np.asarray(step.feature_importances_).ravel()
 
-        if imps is not None and outdir is not None:
-            imps.sort_values("weight", key=abs, ascending=False)\
-                .to_csv(os.path.join(outdir, "importances.csv"), index=False)
-    
-        # if hasattr(step, "coef_"):
-        #     weights = step.coef_.ravel()
-        # elif hasattr(step, "feature_importances_"):
-        #     weights = step.feature_importances_.ravel()
-        # if weights is not None and len(weights) == len(feat_names):
-        #     tmp = pd.DataFrame({"feature": feat_names, "weight": weights, "fold": k})
-        #     per_fold_coefs.append(tmp)
+        if weights is not None and len(weights) == len(feat_names):
+            tmp = pd.DataFrame(
+                {"feature": feat_names, "weight": weights, "fold": k}
+            )
+            per_fold_coefs.append(tmp)
 
     # Summaries
     metrics_df = pd.DataFrame(fold_rows)
     metrics_df.to_csv(os.path.join(outdir, "cv_metrics.csv"), index=False)
 
     # OOF plots
-    y_true = y.loc[oof_prob.index[oof_prob.notna()]]
     y_prob = oof_prob.dropna()
+    y_true = y.loc[y_prob.index]
+
     title = f"Nested CV — model={model_name}"
-    subtitle = f"n={len(y_true)} | pos={int(y_true.sum())} ({y_true.mean():.2%}) | folds={n_splits_outer}x{n_splits_inner}"
+    subtitle = (
+        f"n={len(y_true)} | pos={int(y_true.sum())} ({y_true.mean():.2%}) "
+        f"| folds={n_splits_outer}x{n_splits_inner}"
+    )
 
     plot_roc(y_true, y_prob, os.path.join(outdir, "roc.png"), title, subtitle)
     plot_pr(y_true, y_prob, os.path.join(outdir, "pr.png"), title, subtitle)
-    brier = plot_calibration(y_true, y_prob, os.path.join(outdir, "calibration.png"), title, subtitle)
+    brier = plot_calibration(
+        y_true, y_prob,
+        os.path.join(outdir, "calibration.png"),
+        title, subtitle
+    )
 
-    # Feature stability
+    # Feature stability across folds (برای logit / SVM / RF)
     coef_summary = pd.DataFrame()
     if per_fold_coefs:
         allc = pd.concat(per_fold_coefs, ignore_index=True)
@@ -378,10 +410,14 @@ def nested_cv_evaluate(
                         .agg(["mean", "std"])
                         .reset_index())
         coef_summary["abs_mean"] = coef_summary["mean"].abs()
-        coef_summary.to_csv(os.path.join(outdir, "importances.csv"), index=False)
+        coef_summary.to_csv(
+            os.path.join(outdir, "importances.csv"), index=False
+        )
         plot_feature_importance_with_errorbars(
-            coef_summary, os.path.join(outdir, "importances.png"),
-            title="Top features (mean ± SD across folds)", subtitle=subtitle
+            coef_summary,
+            os.path.join(outdir, "importances.png"),
+            title="Top features (mean ± SD across folds)",
+            subtitle=subtitle
         )
 
     return {
@@ -390,9 +426,16 @@ def nested_cv_evaluate(
         "pr_path": os.path.join(outdir, "pr.png"),
         "calibration_path": os.path.join(outdir, "calibration.png"),
         "brier": brier,
-        "importances_path": os.path.join(outdir, "importances.csv") if not coef_summary.empty else ""
+        "importances_path": (
+            os.path.join(outdir, "importances.csv")
+            if not coef_summary.empty else ""
+        )
     }
 
+
+# ---------------------------------------------------------------------
+# Permutation test
+# ---------------------------------------------------------------------
 
 def run_permutation_test(
     X: pd.DataFrame,
@@ -408,27 +451,44 @@ def run_permutation_test(
     """
     os.makedirs(outdir, exist_ok=True)
     rng = np.random.RandomState(random_state)
-    aucs = []
+    aucs: List[float] = []
+
     for i in range(1, n_perm + 1):
-        y_perm = y.sample(frac=1.0, replace=False, random_state=rng).values
-        # Single 5-fold CV (non-nested) for speed
+        # permute y (but keep X fixed)
+        idx_perm = rng.permutation(len(y))
+        y_perm = y.values[idx_perm]
+
         model, grid = get_model_and_grid(model_name)
-        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=rng)
+        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=rng.randint(0, 1_000_000))
         oof = pd.Series(index=X.index, dtype=float)
+
         for tr, te in cv.split(X, y_perm):
-            model_ = GridSearchCV(model, grid, scoring="roc_auc", cv=3, n_jobs=-1)
-            model_.fit(X.iloc[tr], y_perm[tr])
-            prob = model_.best_estimator_.predict_proba(X.iloc[te])[:, 1] if hasattr(model_.best_estimator_, "predict_proba") else model_.best_estimator_.decision_function(X.iloc[te])
-            if prob.min() < 0 or prob.max() > 1:
+            gscv = GridSearchCV(
+                model, grid, scoring="roc_auc", cv=3, n_jobs=-1
+            )
+            gscv.fit(X.iloc[tr], y_perm[tr])
+            best = gscv.best_estimator_
+
+            if hasattr(best, "predict_proba"):
+                prob = best.predict_proba(X.iloc[te])[:, 1]
+            else:
+                prob = best.decision_function(X.iloc[te])
                 pmin, pmax = prob.min(), prob.max()
                 if pmax > pmin:
                     prob = (prob - pmin) / (pmax - pmin)
+
             oof.iloc[te] = prob
+
         aucs.append(roc_auc_score(y, oof))
+
     df = pd.DataFrame({"perm": range(1, n_perm + 1), "auc": aucs})
     df.to_csv(os.path.join(outdir, "permutation_auc.csv"), index=False)
     return df
 
+
+# ---------------------------------------------------------------------
+# Learning curve
+# ---------------------------------------------------------------------
 
 def save_learning_curve(
     X: pd.DataFrame,
@@ -443,15 +503,21 @@ def save_learning_curve(
     Compute and plot a learning curve (train sizes vs. CV score) using ROC-AUC.
     """
     model, grid = get_model_and_grid(model_name)
-    # For learning curve we just pick a reasonable default model (no grid for speed):
-    base_estimator = model
-    if model_name.lower() in ["logit", "logistic", "elasticnet", "logit_en"]:
-        base_estimator.set_params(clf__l1_ratio=0.5)
 
-    cv = StratifiedKFold(n_splits=cv_splits, shuffle=True, random_state=random_state)
+    # For learning curve, use base estimator (no grid) for speed
+    base_estimator = model
+
+    cv = StratifiedKFold(
+        n_splits=cv_splits,
+        shuffle=True,
+        random_state=random_state
+    )
     train_sizes, train_scores, test_scores = learning_curve(
-        base_estimator, X, y, cv=cv, scoring="roc_auc",
-        train_sizes=np.linspace(0.2, 1.0, 6), n_jobs=-1, shuffle=True, random_state=random_state
+        base_estimator, X, y,
+        cv=cv,
+        scoring="roc_auc",
+        train_sizes=np.linspace(0.2, 1.0, 6),
+        n_jobs=-1
     )
     df = pd.DataFrame({
         "train_size": train_sizes,
@@ -465,9 +531,12 @@ def save_learning_curve(
     fig = plt.figure(figsize=(4.6, 3.6))
     ax = fig.add_subplot(111)
     ax.plot(train_sizes, df["cv_auc_mean"], lw=2, marker="o")
-    ax.fill_between(train_sizes,
-                    df["cv_auc_mean"] - df["cv_auc_std"],
-                    df["cv_auc_mean"] + df["cv_auc_std"], alpha=0.25)
+    ax.fill_between(
+        train_sizes,
+        df["cv_auc_mean"] - df["cv_auc_std"],
+        df["cv_auc_mean"] + df["cv_auc_std"],
+        alpha=0.25
+    )
     ax.set_xlabel("Training samples")
     ax.set_ylabel("CV ROC-AUC")
     _decorate(ax, "Learning curve", f"model={model_name} | folds={cv_splits}")
