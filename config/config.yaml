@@ -64,8 +64,8 @@ da:
   pairs: "data/processed/matched_pairs.csv"   # اگر داری
   deltas: ""      # اگر از قبل داری (بهتر طبق یادداشت 115)
   outdir: "results/da"
-  alpha: 0.05
-  volcano_metric: "q"
+  alpha: 0.10
+  volcano_metric: "p"
   heat_topk: 10
   label_topk: 10
   paired_min_pairs: 5
@@ -75,3 +75,11 @@ qc:
   prevalence: 0.50
   mean_pct: 0.50
   cap: 30
+
+ml:
+  outdir: "results/ml"
+  levels: ["species","genus"]
+  models: ["logit", "svm", "rf", "xgb"]
+  outer_folds: 5
+  inner_folds: 4
+  permutations: 0

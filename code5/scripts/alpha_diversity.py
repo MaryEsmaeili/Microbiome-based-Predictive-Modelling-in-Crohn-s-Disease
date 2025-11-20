@@ -476,137 +476,55 @@ def four_group_panel(df_all: pd.DataFrame, out_png: Path,
 
 def crohn_paired_lines_panel(alpha_all: pd.DataFrame, covars_df: pd.DataFrame,
                              pairs: List[Tuple[str,str]], out_png: Path, palettes: Dict[str, List[str]]):
-    """
-    Plot paired Crohn oral vs fecal alpha metrics.
-
-    - Restrict to Crohn samples; optionally restrict to covariate cohort.
-    - Draw paired lines for each metric.
-    - Legend shows group colors + n (number of pairs).
-    - Subplot captions ONLY show p and q (no n, no effect size).
-    """
     # Restrict to Crohn with covariates when covars exist
     base = alpha_all.copy()
     if covars_df is not None and not covars_df.empty:
-        have = set(
-            covars_df["Sample_ID"]
-            .astype(str)
-            .map(normalize_sample_id)
-            .unique()
-        )
+        have = set(covars_df["Sample_ID"].astype(str).map(normalize_sample_id).unique())
         base = base[base["Sample_ID"].isin(have)]
-
-    crohn = base[base["disease"] == 1].copy()
-    oral  = crohn[crohn["site"] == "oral"].set_index("Sample_ID")
-    fecal = crohn[crohn["site"] == "fecal"].set_index("Sample_ID")
-
-    # If no explicit pairs file, use intersection of IDs
+    crohn = base[base["disease"]==1].copy()
+    oral  = crohn[crohn["site"]=="oral"].set_index("Sample_ID")
+    fecal = crohn[crohn["site"]=="fecal"].set_index("Sample_ID")
     if not pairs:
         inter = oral.index.intersection(fecal.index)
         pairs = [(sid, sid) for sid in inter]
-
     if not pairs:
-        placeholder_plot(out_png, "Crohn Oral↔Fecal Paired (No pairs)")
-        return
-
-    wilco_p = []
-    series_by_metric = {}
-    n_pairs_per_metric = {}
-
-    # Build paired series per metric and Wilcoxon p-values
+        placeholder_plot(out_png, "Crohn Oral↔Fecal Paired (No pairs)"); return
+    wilco_p = []; series_by_metric = {}
     for m in METRICS:
         xo, xf = [], []
         for o_id, f_id in pairs:
-            vo = oral[m].get(o_id)  if (m in oral.columns  and o_id in oral.index)  else np.nan
+            vo = oral[m].get(o_id)  if (m in oral.columns and  o_id in oral.index) else np.nan
             vf = fecal[m].get(f_id) if (m in fecal.columns and f_id in fecal.index) else np.nan
-            if pd.notna(vo) and pd.notna(vf):
-                xo.append(float(vo))
-                xf.append(float(vf))
-
+            if pd.notna(vo) and pd.notna(vf): xo.append(float(vo)); xf.append(float(vf))
         series_by_metric[m] = (xo, xf)
-        n_pairs_per_metric[m] = len(xo)
-
         if len(xo) >= 1:
-            try:
-                stat, p = wilcoxon(
-                    xo, xf,
-                    zero_method="wilcox",
-                    alternative="two-sided",
-                    correction=False,
-                    mode="auto",
-                )
-            except Exception:
-                p = np.nan
+            try: stat, p = wilcoxon(xo, xf, zero_method="wilcox", alternative="two-sided",
+                                    correction=False, mode="auto")
+            except Exception: p = np.nan
         else:
             p = np.nan
-
         wilco_p.append(p)
-
-    # Global n for legend: max usable pairs across metrics
-    n_pairs_global = max(n_pairs_per_metric.values()) if n_pairs_per_metric else 0
-
-    # FDR across metrics
-    wilco_q = fdr(wilco_p) if any([not pd.isna(p) for p in wilco_p]) else np.array([np.nan] * len(METRICS))
-
-    # ---- Plot ----
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4.6), sharey=False)
-
+    wilco_q = fdr(wilco_p) if any([not pd.isna(p) for p in wilco_p]) else np.array([np.nan]*len(METRICS))
+    fig, axes = plt.subplots(1,3, figsize=(14,4.6), sharey=False)
     for i, m in enumerate(METRICS):
         ax = axes[i]
         xo, xf = series_by_metric[m]
-
         if len(xo) == 0:
-            ax.axis("off")
-            ax.text(0.5, 0.5, f"No pairs: {m}", ha="center")
-            continue
-
-        # Paired lines
-        for a, b in zip(xo, xf):
-            ax.plot([0, 1], [a, b], alpha=0.5, lw=1.0, color="#7f7f7f")
-
-        # Points
-        ax.scatter(
-            [0] * len(xo), xo,
-            s=24, alpha=0.9,
-            c=palettes["oral"][0], label="Crohn-Oral",
-        )
-        ax.scatter(
-            [1] * len(xf), xf,
-            s=24, alpha=0.9,
-            c=palettes["fecal"][0], label="Crohn-Fecal",
-        )
-
-        ax.set_xticks([0, 1])
-        ax.set_xticklabels(["Oral", "Fecal"])
-        ax.set_title(m)
-        ax.set_xlim(-0.3, 1.3)
-
-        # Caption: ONLY p و q
-        p = wilco_p[i]
-        q = wilco_q[i] if i < len(wilco_q) else np.nan
-        caption = format_annot_2x(p=p, q=q)
-
-        ax.text(
-            0.5, -0.22,
-            caption,
-            transform=ax.transAxes,
-            ha="center", va="top",
-            fontsize=9,
-        )
-
-    # Global legend: رنگ + n
-    label_oral  = f"Crohn-Oral (n={n_pairs_global})"
-    label_fecal = f"Crohn-Fecal (n={n_pairs_global})"
-    handles = [
-        mpatches.Patch(color=palettes["oral"][0],  label=label_oral),
-        mpatches.Patch(color=palettes["fecal"][0], label=label_fecal),
-    ]
+            ax.axis("off"); ax.text(0.5,0.5,f"No pairs: {m}", ha="center"); continue
+        for a, b in zip(xo, xf): ax.plot([0,1],[a,b], alpha=0.5, lw=1.0, color="#7f7f7f")
+        ax.scatter([0]*len(xo), xo, s=24, alpha=0.9, c=palettes["oral"][0], label="Crohn-Oral")
+        ax.scatter([1]*len(xf), xf, s=24, alpha=0.9, c=palettes["fecal"][0], label="Crohn-Fecal")
+        ax.set_xticks([0,1]); ax.set_xticklabels(["Oral","Fecal"])
+        ax.set_title(m); ax.set_xlim(-0.3,1.3)
+        p = wilco_p[i]; q = wilco_q[i] if i < len(wilco_q) else np.nan
+        ax.text(0.5,-0.22, f"n(pairs)={len(xo)} | p={np.nan if pd.isna(p) else f'{p:.2e}'} | q={np.nan if pd.isna(q) else f'{q:.2e}'}",
+                transform=ax.transAxes, ha="center", va="top", fontsize=9)
+    handles = [mpatches.Patch(color=palettes["oral"][0], label="Crohn-Oral"),
+               mpatches.Patch(color=palettes["fecal"][0], label="Crohn-Fecal")]
     fig.legend(handles=handles, frameon=False, loc="upper right")
-
     plt.suptitle("Crohn — Oral vs Fecal (Paired lines; WITH covariates cohort)", y=0.98)
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-    ensure_dir(out_png.parent)
-    plt.savefig(out_png, dpi=300)
-    plt.close()
+    plt.tight_layout(rect=[0,0,1,0.96]); ensure_dir(out_png.parent)
+    plt.savefig(out_png, dpi=300); plt.close()
 
 # ------------------------------ Modeling --------------------------------
 def _prep_design(dd: pd.DataFrame, ycol: str, xcols: List[str]):
@@ -888,61 +806,30 @@ def run_alpha(*, level: str, oral_crohn: str, fecal_crohn: str,
     pd.DataFrame(rows).assign(q_mwu=lambda d: fdr(d["p_mwu"].tolist())) \
         .to_csv(outdir / "oral_fecal_unpaired_by_group.csv", index=False)
 
-        # paired wilcoxon summary
-    # Use the SAME pairs as for the paired plot if available;
-    # otherwise fall back to ID intersection.
-    crohn = alpha_raw[alpha_raw["disease"] == 1].copy()
-    co_oral  = crohn[crohn["site"] == "oral"].set_index("Sample_ID")
-    co_fecal = crohn[crohn["site"] == "fecal"].set_index("Sample_ID")
-
-    if not pairs:  # no pairs file → try automatic matching
-        inter = co_oral.index.intersection(co_fecal.index)
-        pairs_for_stats = [(sid, sid) for sid in inter]
-    else:
-        pairs_for_stats = pairs
-
+    # paired wilcoxon summary
+    # build pairs from raw crohn cohort (will be filtered inside plot to covariate cohort)
+    crohn = alpha_raw[alpha_raw["disease"]==1].copy()
+    oral  = crohn[crohn["site"]=="oral"]["Sample_ID"]
+    fecal = crohn[crohn["site"]=="fecal"]["Sample_ID"]
+    inter = oral[oral.isin(fecal)].unique().tolist()
+    pairs = [(sid, sid) for sid in inter]
     rows = []
+    co_oral  = crohn[crohn["site"]=="oral"].set_index("Sample_ID")
+    co_fecal = crohn[crohn["site"]=="fecal"].set_index("Sample_ID")
     for m in METRICS:
         xo, xf = [], []
-        for o_id, f_id in pairs_for_stats:
-            if m in co_oral.columns and o_id in co_oral.index:
-                vo = co_oral.loc[o_id, m]
-            else:
-                vo = np.nan
-            if m in co_fecal.columns and f_id in co_fecal.index:
-                vf = co_fecal.loc[f_id, m]
-            else:
-                vf = np.nan
-            if pd.notna(vo) and pd.notna(vf):
-                xo.append(float(vo))
-                xf.append(float(vf))
-
+        for o_id, f_id in pairs:
+            vo = co_oral.get(m).get(o_id) if (m in co_oral.columns and  o_id in co_oral.index) else np.nan
+            vf = co_fecal.get(m).get(f_id) if (m in co_fecal.columns and f_id in co_fecal.index) else np.nan
+            if pd.notna(vo) and pd.notna(vf): xo.append(float(vo)); xf.append(float(vf))
         if len(xo) == 0:
-            rows.append({
-                "metric": m,
-                "n_pairs": 0,
-                "wilcoxon_stat": np.nan,
-                "p_value": np.nan
-            })
-            continue
+            rows.append({"metric":m,"n_pairs":0,"wilcoxon_stat":np.nan,"p_value":np.nan}); continue
+        stat, p = wilcoxon(xo, xf, zero_method="wilcox", alternative="two-sided",
+                           correction=False, mode="auto")
+        rows.append({"metric":m,"n_pairs":len(xo),"wilcoxon_stat":float(stat),"p_value":float(p)})
+    pd.DataFrame(rows).assign(q_value=lambda d: fdr(d["p_value"].tolist())) \
+        .to_csv(outdir / "paired_wilcoxon_summary.csv", index=False)
 
-        stat, p = wilcoxon(
-            xo, xf,
-            zero_method="wilcox",
-            alternative="two-sided",
-            correction=False,
-            mode="auto",
-        )
-        rows.append({
-            "metric": m,
-            "n_pairs": len(xo),
-            "wilcoxon_stat": float(stat),
-            "p_value": float(p),
-        })
-
-    pd.DataFrame(rows).assign(
-        q_value=lambda d: fdr(d["p_value"].tolist())
-    ).to_csv(outdir / "paired_wilcoxon_summary.csv", index=False)
 # ----------------------------------- Main -----------------------------------
 def main():
     ap = argparse.ArgumentParser()

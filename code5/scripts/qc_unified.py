@@ -10,62 +10,6 @@ from scipy.spatial.distance import pdist, squareform
 from scipy.stats import gaussian_kde
 from numpy.random import default_rng
 import statsmodels.api as sm
-import yaml
-import matplotlib.colors as mcolors
-# ------------------------------------------------
-# Color palette helpers (ColorDot YAML)
-# ------------------------------------------------
-
-PALETTE: Dict[str, str] = {}  # will be filled in main()
-
-
-def load_palette(yaml_path: str) -> Dict[str, str]:
-    """Load hex color palette from YAML file."""
-    if not yaml_path or not os.path.exists(yaml_path):
-        return {}
-    try:
-        with open(yaml_path, "r") as f:
-            data = yaml.safe_load(f) or {}
-    except Exception:
-        return {}
-    # flatten one level if needed
-    if isinstance(data, dict) and "colors" in data and isinstance(data["colors"], dict):
-        data = data["colors"]
-    return {str(k): str(v) for k, v in data.items()}
-
-
-def get_site_color(site: str, default: str = "#666666") -> str:
-    """
-    Map site -> color using global PALETTE.
-    Fallback to `default` if key is missing.
-    """
-    site = str(site).capitalize()
-    if not PALETTE:
-        return default
-    if site == "Oral":
-        # use Crohn-Oral as canonical oral color
-        return PALETTE.get("Crohn-Oral", default)
-    if site == "Fecal":
-        # use Crohn-Fecal as canonical fecal color
-        return PALETTE.get("Crohn-Fecal", default)
-    return default
-
-
-def adjust_color(color: str, factor: float) -> str:
-    """
-    Lighten (factor>1) or darken (factor<1) a hex color.
-    factor=1 -> unchanged.
-    """
-    try:
-        rgb = np.array(mcolors.to_rgb(color))
-    except ValueError:
-        return color
-    if factor > 1.0:  # lighten
-        out = 1.0 - (1.0 - rgb) / factor
-    else:             # darken
-        out = rgb * max(factor, 0.0)
-    out = np.clip(out, 0.0, 1.0)
-    return mcolors.to_hex(out)
 
 # ================================================================
 # Small utilities
@@ -256,10 +200,7 @@ def pca_scatter(M: pd.DataFrame, meta_idx: pd.DataFrame, out_png: str,
     var = var / var.sum()
 
     fig, ax = plt.subplots(figsize=(7.3, 6.1))
-    color = {
-        "Oral":  get_site_color("Oral",  "#246cb3"),
-        "Fecal": get_site_color("Fecal", "#b26ad4"),
-    }
+    color = {"Oral":"#00798c", "Fecal":"#d1495b"}   # site colors
     marker = {0:"o", 1:"s"}                        # disease shapes
 
     # Align meta to M rows
@@ -497,24 +438,18 @@ def box_by_group(long_df: pd.DataFrame, taxa: List[str], site: str, out_png: str
 
     taxa_list = list(taxa)
     pos = np.arange(len(taxa_list))
-    fig, ax = plt.subplots(figsize=(min(16, 1.4 * len(taxa_list) + 6), 5.5))
-
-    # Site-specific base color: Oral → blue-ish, Fecal → purple-ish
-    base = get_site_color(site, "#547DD3" if site == "Oral" else "#794dae")
-    # Two shades for the two groups
-    c_light = adjust_color(base, 1.8)  # lighter
-    c_dark  = adjust_color(base, 0.7)  # darker
+    fig, ax = plt.subplots(figsize=(min(16, 1.4*len(taxa_list)+6), 5.5))
 
     for i, t in enumerate(taxa_list):
         vals = []
         for g in groups:
             vals.append(d[(d["taxon"] == t) & (d[group_col] == g)]["CLR"].values)
         offs = np.linspace(-0.18, 0.18, len(groups))
-        shade_cycle = [c_light, c_dark][: len(groups)]
-        for v, off, col in zip(vals, offs, shade_cycle):
+        for v, off in zip(vals, offs):
             bp = ax.boxplot([v], positions=[i + off], widths=0.32, patch_artist=True)
-            for b in bp["boxes"]:
-                b.set(facecolor=col)
+            for b in bp['boxes']:
+                b.set(facecolor="#9ad1d4" if off < 0 else "#2b8a9a")
+
     ax.set_xticks(pos)
     ax.set_xticklabels([pretty_label(t) for t in taxa_list], rotation=60, ha="right")
     ax.set_ylabel("CLR")
@@ -528,36 +463,26 @@ def interaction_means(long_df: pd.DataFrame, taxa: List[str], out_png: str):
     Line plot of mean CLR by site (Oral vs Fecal) for each taxon,
     stratified by disease (Healthy vs Crohn).
 
-    For each taxon:
-      - solid line with circles  = Healthy
-      - dashed line with squares = Crohn
-      - left point  = Oral
-      - right point = Fecal
+    This visually highlights disease × site interactions for the selected taxa.
     """
     sel = long_df[long_df["taxon"].isin(taxa)]
     if sel.empty:
         save_empty_png(out_png, "No data")
         return
 
-    fig, ax = plt.subplots(figsize=(max(12, 1.0 * len(taxa) + 6), 6))
+    fig, ax = plt.subplots(figsize=(max(12, 1.0*len(taxa)+6), 6))
     xbase = {t: i for i, t in enumerate(taxa)}
 
     for t in taxa:
-        for dis, ls, mk, lab in [
-            (0, "-", "o", "Healthy"),
-            (1, "--", "s", "Crohn"),
-        ]:
-            vo = sel[(sel["taxon"] == t) & (sel["site"] == "Oral") & (sel["disease"] == dis)]["CLR"].values
+        for dis, ls, mk in [(0, "-", "o"), (1, "--", "s")]:
+            vo = sel[(sel["taxon"] == t) & (sel["site"] == "Oral")  & (sel["disease"] == dis)]["CLR"].values
             vf = sel[(sel["taxon"] == t) & (sel["site"] == "Fecal") & (sel["disease"] == dis)]["CLR"].values
             if len(vo) == 0 or len(vf) == 0:
                 continue
             ax.plot(
                 [xbase[t] + 0.0, xbase[t] + 0.6],
                 [np.mean(vo), np.mean(vf)],
-                ls=ls,
-                marker=mk,
-                lw=2,
-                label=lab if t == taxa[0] else None,
+                ls=ls, marker=mk, lw=2
             )
 
     ax.set_xticks([xbase[t] + 0.3 for t in taxa])
@@ -565,87 +490,12 @@ def interaction_means(long_df: pd.DataFrame, taxa: List[str], out_png: str):
     ax.set_ylabel("Mean CLR")
     ax.axhline(0, ls=":", color="#aaa")
     ax.set_title("Interaction means (disease × site)")
-
-    # Legend only once
-    ax.legend(frameon=False, loc="upper left")
-
-    # Explicit note about left/right
-    fig.text(
-        0.5,
-        0.02,
-        "For each taxon: left point = Oral, right point = Fecal",
-        ha="center",
-        va="bottom",
-        fontsize=9,
-    )
-
-    fig.tight_layout()
-    fig.savefig(out_png, dpi=300, bbox_inches="tight")
-    plt.close(fig)
-
-def interaction_means_ppi(
-    long_ppi: pd.DataFrame,
-    long_healthy: pd.DataFrame,
-    taxa: List[str],
-    out_png: str,
-):
-    """
-    Interaction plot for PPI-mode:
-
-      - Crohn PPI-users (track of interest)
-      - Healthy baseline (no PPI), same taxa
-
-    For each taxon:
-      - solid line with circles  = Healthy baseline
-      - dashed line with squares = Crohn PPI-user
-      - left point  = Oral
-      - right point = Fecal
-    """
-    sel_h = long_healthy[long_healthy["taxon"].isin(taxa)]
-    sel_p = long_ppi[long_ppi["taxon"].isin(taxa)]
-
-    if sel_h.empty or sel_p.empty:
-        save_empty_png(out_png, "Not enough data for PPI interaction")
-        return
-
-    fig, ax = plt.subplots(figsize=(max(12, 1.0 * len(taxa) + 6), 6))
-    xbase = {t: i for i, t in enumerate(taxa)}
-
-    def _plot_group(d, ls, mk, label):
-        for t in taxa:
-            vo = d[(d["taxon"] == t) & (d["site"] == "Oral")]["CLR"].values
-            vf = d[(d["taxon"] == t) & (d["site"] == "Fecal")]["CLR"].values
-            if len(vo) == 0 or len(vf) == 0:
-                continue
-            ax.plot(
-                [xbase[t] + 0.0, xbase[t] + 0.6],
-                [np.mean(vo), np.mean(vf)],
-                ls=ls,
-                marker=mk,
-                lw=2,
-                label=label if t == taxa[0] else None,
-            )
-
-    # Healthy baseline (no PPI)
-    _plot_group(sel_h, "-", "o", "Healthy baseline (no PPI)")
-    # Crohn PPI-users
-    _plot_group(sel_p, "--", "s", "Crohn PPI-users")
-
-    ax.set_xticks([xbase[t] + 0.3 for t in taxa])
-    ax.set_xticklabels([pretty_label(t) for t in taxa], rotation=55, ha="right")
-    ax.set_ylabel("Mean CLR")
-    ax.axhline(0, ls=":", color="#aaa")
-    ax.set_title("Oral–fecal mean CLR — Crohn PPI-users vs healthy baseline")
-
-    ax.legend(frameon=False, loc="upper left")
-
-    fig.text(
-        0.5,
-        0.02,
-        "For each taxon: left point = Oral, right point = Fecal",
-        ha="center",
-        va="bottom",
-        fontsize=9,
+    ax.legend(
+        [plt.Line2D([0],[0], ls="-",  marker="o"),
+         plt.Line2D([0],[0], ls="--", marker="s")],
+        ["Healthy", "Crohn"],
+        frameon=False,
+        loc="upper left"
     )
 
     fig.tight_layout()
@@ -689,8 +539,6 @@ def spaghetti_pairs(long_df: pd.DataFrame, pairs_csv: Optional[str], taxa: List[
     if not isinstance(axes, np.ndarray):
         axes = np.array([axes])
 
-    c_up   = get_site_color("Fecal", "#246cb3")  # Oral -> Fecal increase
-    c_down = get_site_color("Oral",  "#d477e3")  # Oral -> Fecal decrease
     for ax, t in zip(axes, taxa[:rows]):
         dd = crohn[crohn["taxon"] == t].set_index(["Sample_ID","site"])["CLR"].unstack("site")
         if dd is None or "Oral" not in dd or "Fecal" not in dd:
@@ -701,22 +549,11 @@ def spaghetti_pairs(long_df: pd.DataFrame, pairs_csv: Optional[str], taxa: List[
                 o in dd.index and f in dd.index and
                 pd.notna(dd.at[o,"Oral"]) and pd.notna(dd.at[f,"Fecal"])
             ):
-
                 ax.plot(
                     [0, 1],
-                    [dd.at[o, "Oral"], dd.at[f, "Fecal"]],
-                    color=c_up if dd.at[f, "Fecal"] > dd.at[o, "Oral"] else c_down,
-                    alpha=0.35,
-                    lw=1.2,
-                    marker="o",
-                )
-                ax.plot(
-                    [0, 1],
-                    [dd.at[o, "Oral"], dd.at[f, "Fecal"]],
-                    color=c_up if dd.at[f, "Fecal"] > dd.at[o, "Oral"] else c_down,
-                    alpha=0.35,
-                    lw=1.2,
-                    marker="o",
+                    [dd.at[o,"Oral"], dd.at[f,"Fecal"]],
+                    color="#2ca02c" if dd.at[f,"Fecal"] > dd.at[o,"Oral"] else "#d62728",
+                    alpha=0.35, lw=1.2, marker="o"
                 )
         ax.axhline(0, ls=":", color="#aaa")
         ax.set_title(pretty_label(t))
@@ -804,22 +641,9 @@ def main():
     ap.add_argument("--modes", nargs="+", choices=["NOCOV","WITHCOV","PPI_WITHCOV"],
                     default=["NOCOV","WITHCOV","PPI_WITHCOV"],
                     help="Which analysis modes to run.")
-    ap.add_argument(
-        "--source-map",
-        default=None,
-        help=(
-            "Optional CSV with fallback labels for NOCOV; "
-            "columns like Sample_ID, site_fallback, disease_fallback, cohort."
-        ),
-    )
     ap.add_argument("--ppi-include-healthy", action="store_true",
                     help="For PPI_WITHCOV mode, include healthy with PPI usage as well.")
-    ap.add_argument("--colors-yaml", default="config/colors.yml",
-                    help="YAML file with color palette (ColorDot).")
     args = ap.parse_args()
-
-    global PALETTE
-    PALETTE = load_palette(args.colors_yaml)
 
     base = os.path.join(args.outdir, args.rank)
     ensure_dir(base)
@@ -838,41 +662,15 @@ def main():
     # ------------------------------------------------------------
     # Load / normalize metadata and align with pct columns
     # ------------------------------------------------------------
-    # ------------------------------------------------------------
-    # Load / normalize metadata (for WITHCOV/PPI)
-    # and optional fallback labels for NOCOV
-    # ------------------------------------------------------------
-    meta = normalize_meta(args.meta)  # full metadata table (can have NaNs)
-
-    # Optional fallback site/disease labels for NOCOV
-    meta_nocov = None
-    if getattr(args, "source_map", None) and args.source_map and os.path.exists(args.source_map):
-        src = pd.read_csv(args.source_map)
-        cols = {str(c).lower(): c for c in src.columns}
-
-        sid_col  = cols.get("sample_id") or cols.get("sampleid") or cols.get("id")
-        site_col = cols.get("site_fallback") or cols.get("site")
-        dis_col  = cols.get("disease_fallback") or cols.get("disease") or cols.get("status")
-
-        if sid_col and site_col and dis_col:
-            meta_nocov = pd.DataFrame({
-                "sample_id": src[sid_col].astype(str),
-                "site": src[site_col].astype(str)
-                                .str.strip()
-                                .str.capitalize()
-                                .replace({"Faecal": "Fecal"}),
-                "disease": src[dis_col].map(to01),
-            })
-            meta_nocov = meta_nocov[meta_nocov["sample_id"].isin(pct.columns)]
-    if meta_nocov is None:
-        meta_nocov = meta.copy()
-
-    meta = meta.dropna(subset=["site", "disease"])
+    meta = normalize_meta(args.meta).dropna(subset=["site","disease"])
+    pct = pct.loc[:, pct.columns.isin(meta["sample_id"].astype(str))]
+    meta = meta[meta["sample_id"].isin(pct.columns)]
 
     if pct.empty:
+        # No overlapping samples between abundance and metadata
         for suf in ["_NOCOV","_WITHCOV","_PPI_WITHCOV"]:
             save_empty_png(os.path.join(base, f"pca_scatter{suf}.png"), "No samples overlap")
-        print("[QC] Empty percent table.")
+        print("[QC] No overlap between pct and meta.")
         return
 
     # ------------------------------------------------------------
@@ -934,6 +732,8 @@ def main():
     # ------------------------------------------------------------
     # Run each track
     # ------------------------------------------------------------
+    site_vec = meta.set_index("sample_id")["site"]
+
     for mode, kind, keep_cols, _skip_cov, *opt in tracks:
         suffix = f"_{mode}"
 
@@ -952,29 +752,15 @@ def main():
                 ]).to_csv(os.path.join(base, f"permanova{suffix}.tsv"), sep="\t", index=False)
                 continue
         else:
-            # Start from full CLR (all samples that passed taxa filter)
+            # Use all CLR and all metadata
             clr = clr_all.copy()
-
-            # Select which metadata to use:
-            # - NOCOV: fallback labels (full 256 نمونه)
-            # - WITHCOV: فقط نمونه‌هایی که covariate دارند (۱۸۸ تا)
-            if mode == "NOCOV":
-                meta_use = meta_nocov.copy()
-            else:  # WITHCOV و هر mode شبیه آن
-                meta_use = meta.copy()
-
-            # Ensure we actually have a sample_id column
+            meta_use = meta.copy()
             if "sample_id" not in meta_use.columns:
                 if meta_use.index.name == "sample_id":
                     meta_use = meta_use.reset_index()
                 else:
                     meta_use = meta_use.reset_index().rename(columns={"index": "sample_id"})
 
-            # Align samples: intersection between CLR columns and metadata sample_ids
-            meta_use["sample_id"] = meta_use["sample_id"].astype(str)
-            common = clr.columns.intersection(meta_use["sample_id"])
-            clr = clr.loc[:, common]
-            meta_use = meta_use[meta_use["sample_id"].isin(common)]
         # --------------------------------------------------------
         # Residualization mode
         # --------------------------------------------------------
@@ -1021,38 +807,27 @@ def main():
 
         adj_use = adj.loc[taxa_union]
         long = make_long(adj_use, meta_use)
+
         # --------------------------------------------------------
         # Sample counts: who actually went into this mode
         # --------------------------------------------------------
-        counts = long.drop_duplicates(["Sample_ID"]).copy()
-
-        # Make disease integer if present
-        if "disease" in counts.columns:
-            counts["disease"] = counts["disease"].astype("Int64")
+        counts = (
+            long.assign(
+                disease=long["disease"].astype("Int64"),
+                ppi_use=long["ppi_use"].astype("Int64")
+            )
+            .drop_duplicates(["Sample_ID"])
+        )
 
         # site × disease counts
-        counts_sd = (
-            counts
-            .value_counts(["site", "disease"], dropna=False)
-            .reset_index(name="n")
-        )
-        counts_sd.to_csv(
-            os.path.join(base, f"sample_counts_site_disease{suffix}.csv"),
-            index=False,
-        )
+        counts_sd = counts.value_counts(["site","disease"], dropna=False).reset_index(name="n")
+        counts_sd.to_csv(os.path.join(base, f"sample_counts_site_disease{suffix}.csv"), index=False)
 
-        # site × ppi_use counts (فقط اگر PPI-track و ستون وجود دارد)
-        if kind == "ppi" and "ppi_use" in counts.columns:
-            counts["ppi_use"] = counts["ppi_use"].astype("Int64")
-            counts_sp = (
-                counts
-                .value_counts(["site", "ppi_use"], dropna=False)
-                .reset_index(name="n")
-            )
-            counts_sp.to_csv(
-                os.path.join(base, f"sample_counts_site_ppi{suffix}.csv"),
-                index=False,
-            )
+        # site × ppi_use counts (only for PPI track)
+        if kind == "ppi":
+            counts_sp = counts.value_counts(["site","ppi_use"], dropna=False).reset_index(name="n")
+            counts_sp.to_csv(os.path.join(base, f"sample_counts_site_ppi{suffix}.csv"), index=False)
+
         # --------------------------------------------------------
         # Prepare wide matrix (samples x taxa) for PCA / PERMANOVA
         # --------------------------------------------------------
@@ -1098,78 +873,16 @@ def main():
                          os.path.join(base, f"box_fecal{suffix}.png"),
                          group_col="disease")
 
-        # Density plots (same for all modes)
-        kde_site(
-            long,
-            top.get("Oral", []),
-            "Oral",
-            os.path.join(base, f"density_top_taxa_oral{suffix}.png"),
-        )
-        kde_site(
-            long,
-            top.get("Fecal", []),
-            "Fecal",
-            os.path.join(base, f"density_top_taxa_fecal{suffix}.png"),
-        )
+        # Density plots, interaction plots, and paired spaghetti
+        kde_site(long, top.get("Oral", []),  "Oral",
+                 os.path.join(base, f"density_top_taxa_oral{suffix}.png"))
+        kde_site(long, top.get("Fecal", []), "Fecal",
+                 os.path.join(base, f"density_top_taxa_fecal{suffix}.png"))
+        interaction_means(long, taxa_union,
+                          os.path.join(base, f"interaction_means{suffix}.png"))
+        spaghetti_pairs(long, args.pairs, taxa_union,
+                        os.path.join(base, f"paired_spaghetti_crohn{suffix}.png"))
 
-        # Interaction plots: disease vs site OR PPI vs healthy baseline
-        if kind == "ppi":
-            # Build healthy baseline: disease == 0 and no PPI
-            meta_baseline = meta.copy()
-            if "sample_id" not in meta_baseline.columns:
-                if meta_baseline.index.name == "sample_id":
-                    meta_baseline = meta_baseline.reset_index()
-                else:
-                    meta_baseline = meta_baseline.reset_index().rename(
-                        columns={"index": "sample_id"}
-                    )
-
-            # Same residualization model as PPI track
-            keep_cols_ppi = ["site", "ppi_use"] + (
-                [] if args.ppi_include_healthy else ["disease"]
-            )
-
-            # Residualize on the full dataset for these taxa
-            adj_global = residualize(
-                clr_all.loc[taxa_union],
-                meta_baseline,
-                keep_cols=keep_cols_ppi,
-            )
-
-            # Healthy baseline samples: disease == 0 and PPI == 0 or NaN
-            mb = meta_baseline[
-                (meta_baseline["disease"] == 0)
-                & meta_baseline["sample_id"].isin(adj_global.columns)
-            ]
-            mb = mb[
-                mb["ppi_use"].isna()
-                | (mb["ppi_use"] == 0)
-            ]
-            ids_h = mb["sample_id"].astype(str)
-
-            adj_baseline = adj_global.loc[:, adj_global.columns.isin(ids_h)]
-            long_baseline = make_long(adj_baseline, meta_baseline)
-
-            interaction_means_ppi(
-                long,
-                long_baseline,
-                taxa_union,
-                os.path.join(base, f"interaction_means{suffix}.png"),
-            )
-        else:
-            interaction_means(
-                long,
-                taxa_union,
-                os.path.join(base, f"interaction_means{suffix}.png"),
-            )
-
-        # Paired Crohn oral–fecal spaghetti plots (only Crohn)
-        spaghetti_pairs(
-            long,
-            args.pairs,
-            taxa_union,
-            os.path.join(base, f"paired_spaghetti_crohn{suffix}.png"),
-        )
     print("[QC] Done ->", base)
 
 if __name__ == "__main__":

@@ -139,18 +139,26 @@ mk_aitchison <- function(M, pseudo=1e-6){
 }
 
 load_group_colors <- function(yaml_path){
-  # Fixed palette for all beta-diversity plots.
-  # Colors are chosen to match your config/colors.yml.
-  c(
-    "Crohn-Oral"       = "#D192D8",  # Oral_Crohn
-    "Crohn-Fecal"      = "#AA31B3",  # Fecal_Crohn
-    "Healthy-Oral"     = "#A7BDE7",  # Oral_Healthy
-    "Healthy-Fecal"    = "#547DD3",  # Fecal_Healthy
-    "Healthy-Previous" = "#A7BDE7",  # same as Healthy-Oral
-    "Healthy-New"      = "#624097"   # same as Healthy-Oral
+  # Default palette (includes a distinct light purple for Healthy-New)
+  defaults <- c(
+    "Crohn-Oral"       = "#edae49",
+    "Healthy-Previous" = "#00798c",
+    "Healthy-New"      = "#c39bd3",
+    "Crohn-Fecal"      = "#30638e",
+    "Healthy-Fecal"    = "#d1495b",
+    "Healthy-Oral"     = "#00798c"
   )
+  if (is.null(yaml_path) || !file.exists(yaml_path)) return(defaults)
+  cfg <- tryCatch(yaml::read_yaml(yaml_path), error=function(e) NULL); if (is.null(cfg)) return(defaults)
+  out <- defaults
+  if (!is.null(cfg$colors) && is.list(cfg$colors)) {
+    for (k in names(out)) {
+      v <- tryCatch(cfg$colors[[k]], error=function(e) NULL)
+      if (!is.null(v) && nzchar(as.character(v)[1])) out[[k]] <- as.character(v)[1]
+    }
+  }
+  out
 }
-
 
 read_covariates_robust <- function(path){
   cv <- safe_read_csv(path); if (nrow(cv)==0) return(tibble())
@@ -1163,7 +1171,6 @@ task_oral_prevnew <- function(){
   level  <- tolower(get_arg("--level","species"))
 
   dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
-  pal <- load_group_colors(NULL)
 
   # Helpers for this task
   ensure_taxa_by_samples <- function(df) {
@@ -1184,42 +1191,27 @@ task_oral_prevnew <- function(){
     var2 <- round(100 * pc$values$Relative_eig[2], 1)
     list(coords=coords, var1=var1, var2=var2)
   }
-  plot_pcoa <- function(df, var1, var2, title, out_png, pal) {
-  lab_df <- df %>%
-    dplyr::count(Group) %>%
-    dplyr::mutate(label = sprintf("%s (n=%d)", Group, n))
+  plot_pcoa <- function(df, var1, var2, title, out_png) {
+    lab_df <- df %>%
+      dplyr::count(Group) %>%
+      dplyr::mutate(label = sprintf("%s (n=%d)", Group, n))
 
-  lab_vec <- setNames(lab_df$label, lab_df$Group)
+    lab_vec <- setNames(lab_df$label, lab_df$Group)
 
-  # Factor levels for consistent ordering
-  df$Group <- factor(df$Group)
-  groups <- levels(df$Group)
+    p <- ggplot(df, aes(PC1, PC2, color = Group)) +
+      geom_point(size = 2.4, alpha = 0.90) +
+      scale_color_discrete(labels = lab_vec) +
+      theme_minimal(base_size = 14) +
+      theme(
+        legend.title = element_text(size = 13, face = "bold"),
+        legend.position = "right"
+      ) +
+      xlab(sprintf("PC1 (%.1f%%)", var1)) +
+      ylab(sprintf("PC2 (%.1f%%)", var2)) +
+      ggtitle(title)
 
-  pal_full <- c(
-    pal,
-    "Healthy-Other" = pal[["Healthy-Oral"]]
-  )
-
-  pal_use <- pal_full[groups]
-
-  p <- ggplot(df, aes(PC1, PC2, color = Group)) +
-    geom_point(size = 2.4, alpha = 0.90) +
-    scale_color_manual(
-      values = pal_use,
-      breaks = groups,
-      labels = lab_vec[groups]
-    ) +
-    theme_minimal(base_size = 14) +
-    theme(
-      legend.title = element_text(size = 13, face = "bold"),
-      legend.position = "right"
-    ) +
-    xlab(sprintf("PC1 (%.1f%%)", var1)) +
-    ylab(sprintf("PC2 (%.1f%%)", var2)) +
-    ggtitle(title)
-
-  ggsave(out_png, p, width = 10, height = 7.5, dpi = 160, bg = "white")
-}
+    ggsave(out_png, p, width = 10, height = 7.5, dpi = 160, bg = "white")
+  }
 
   to_mat <- function(tbl) { rn <- tbl[[1]]; m <- as.data.frame(tbl[,-1, drop=FALSE]); rownames(m) <- rn; m }
 
@@ -1271,12 +1263,10 @@ task_oral_prevnew <- function(){
     if (any(is_other))    rep("Healthy-Other",    sum(is_other))    else NULL
   )
   df_oral$Group <- factor(labs_oral, levels=c("Crohn-Oral","Healthy-Previous","Healthy-New","Healthy-Other"))
-  plot_pcoa(
-    df_oral, pc_oral$var1, pc_oral$var2,
-    "PCoA (BRAY) — Oral: Crohn vs Healthy-Previous vs Healthy-New",
-    file.path(outdir, sprintf("pcoa_oral_prev_new_crohn_%s.png", level)),
-    pal = pal
-  )
+  plot_pcoa(df_oral, pc_oral$var1, pc_oral$var2,
+            "PCoA (BRAY) — Oral: Crohn vs Healthy-Previous vs Healthy-New",
+            file.path(outdir, sprintf("pcoa_oral_prev_new_crohn_%s.png", level)))
+
   # (2) Oral groups + Crohn-Fecal
   mat_all <- if (is.null(fh_all)) cbind(oc_all, oh_all, fc_all) else cbind(oc_all, oh_all, fc_all, fh_all)
   pc_all  <- pcoa_from_pct(mat_all)
@@ -1293,12 +1283,10 @@ task_oral_prevnew <- function(){
     labs_all,
     levels = c("Crohn-Oral","Healthy-Previous","Healthy-New","Healthy-Other","Crohn-Fecal","Healthy-Fecal")
   )
-  plot_pcoa(
-    df_all, pc_all$var1, pc_all$var2,
-    "PCoA (BRAY) — Oral groups + Fecal",
-    file.path(outdir, sprintf("pcoa_oral_prev_new_crohn_plus_fecal_%s.png", level)),
-    pal = pal
-  )
+  plot_pcoa(df_all, pc_all$var1, pc_all$var2,
+            "PCoA (BRAY) — Oral groups + Fecal",
+            file.path(outdir, sprintf("pcoa_oral_prev_new_crohn_plus_fecal_%s.png", level)))
+
   cat("[OK] Wrote PCoA (oral prev/new) figures to:", outdir, "\n")
 }
 

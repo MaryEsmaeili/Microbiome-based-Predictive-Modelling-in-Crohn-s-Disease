@@ -34,8 +34,8 @@ COLORS_YAML  = CFG.get("colors_yaml", "config/colors.yml")
 DA_CFG         = CFG.get("da", {})
 DA_OUTDIR      = DA_CFG.get("outdir", "results/da")
 DA_LEVELS      = DA_CFG.get("levels", ["species", "genus"])
-DA_ALPHA       = float(DA_CFG.get("alpha", 0.10))
-DA_VOLC_METRIC = DA_CFG.get("volcano_metric", "p")
+DA_ALPHA       = float(DA_CFG.get("alpha", 0.05))
+DA_VOLC_METRIC = DA_CFG.get("volcano_metric", "q")
 DA_PREV_IDS    = DA_CFG.get("oral_healthy_prev_ids", None)
 DA_DELTAS      = DA_CFG.get("deltas_csv", None)
 
@@ -509,7 +509,6 @@ rule qc_level:
           --mean-pct "{params.meanp}" \
           --cap "{params.cap}" \
           --modes NOCOV WITHCOV PPI_WITHCOV \
-          --source-map "data/processed/da_pct_all_sources.csv" \
           {params.ppi_flag} \
           > "{log}" 2>&1
         """
@@ -686,10 +685,3 @@ rule ml_within_site_model_level:
           --permutation {params.perm} \
           > "{log}" 2>&1
         """
-rule ml:
-    """
-    Aggregate target: all ML experiments (within-site + transfer).
-    """
-    input:
-        ML_WITHIN_FLAGS,
-        ML_TRANSFER_FLAGS
