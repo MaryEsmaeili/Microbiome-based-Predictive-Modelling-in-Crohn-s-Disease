@@ -206,6 +206,10 @@ def nested_cv_evaluate(
     Perform nested CV with optional group-aware outer splits. Save figures and CSVs.
     strat_labels (if provided) is used only for stratification of outer folds
     (e.g., combining disease + batch), while y remains the true target.
+
+    NEW:
+      - Save per-sample OOF probabilities in 'cv_predictions.csv'
+      - Save ROC/PR curve points in 'roc_curve.csv' and 'pr_curve.csv'
     """
     os.makedirs(outdir, exist_ok=True)
 
@@ -239,8 +243,11 @@ def nested_cv_evaluate(
     model, grid = get_model_and_grid(model_name)
 
     fold_rows = []
+    # OOF predictions for all samples
     oof_prob = pd.Series(index=X.index, dtype=float)
-    per_fold_coefs = []
+
+    # (we are not using per_fold_coefs yet)
+    per_fold_coefs: List[pd.DataFrame] = []
 
     for k, (tr, te) in enumerate(
         outer.split(X, labels_for_outer, groups if use_groups else None),
@@ -249,6 +256,7 @@ def nested_cv_evaluate(
         Xtr, Xte = X.iloc[tr], X.iloc[te]
         ytr, yte = y.iloc[tr], y.iloc[te]
 
+        # Guard: skip degenerate folds
         if ytr.nunique() < 2 or yte.nunique() < 2:
             continue
 
@@ -261,26 +269,37 @@ def nested_cv_evaluate(
         gscv.fit(Xtr, ytr)
 
         best = gscv.best_estimator_
-        prob = best.predict_proba(Xte)[:, 1] if hasattr(best, "predict_proba") else best.decision_function(Xte)
+
+        if hasattr(best, "predict_proba"):
+            prob = best.predict_proba(Xte)[:, 1]
+        else:
+            prob = best.decision_function(Xte)
+
+        # If decision_function not in [0,1], rescale to [0,1]
         if prob.min() < 0 or prob.max() > 1:
             pmin, pmax = prob.min(), prob.max()
             if pmax > pmin:
                 prob = (prob - pmin) / (pmax - pmin)
 
+        # Store OOF probabilities
         oof_prob.iloc[te] = prob
+
+        # Threshold = 0.5 for metrics
+        y_pred = (prob >= 0.5).astype(int)
 
         row = {
             "fold": k,
             "roc_auc": roc_auc_score(yte, prob),
             "ap": average_precision_score(yte, prob),
-            "acc": accuracy_score(yte, (prob >= 0.5).astype(int)),
-            "bal_acc": balanced_accuracy_score(yte, (prob >= 0.5).astype(int)),
-            "precision": precision_score(yte, (prob >= 0.5).astype(int), zero_division=0),
-            "recall": recall_score(yte, (prob >= 0.5).astype(int), zero_division=0),
-            "f1": f1_score(yte, (prob >= 0.5).astype(int), zero_division=0),
+            "acc": accuracy_score(yte, y_pred),
+            "bal_acc": balanced_accuracy_score(yte, y_pred),
+            "precision": precision_score(yte, y_pred, zero_division=0),
+            "recall": recall_score(yte, y_pred, zero_division=0),
+            "f1": f1_score(yte, y_pred, zero_division=0),
         }
         fold_rows.append(row)
 
+        # Optional: per-fold importances (still not aggregated)
         step = _final_estimator(best)
         imps = None
         if hasattr(step, "coef_"):
@@ -295,44 +314,88 @@ def nested_cv_evaluate(
             imps.sort_values("weight", key=abs, ascending=False)\
                 .to_csv(os.path.join(outdir, "importances.csv"), index=False)
 
-    # Summaries
+    # ---- Fold-level metrics ----
     metrics_df = pd.DataFrame(fold_rows)
     metrics_df.to_csv(os.path.join(outdir, "cv_metrics.csv"), index=False)
 
-    # OOF plots
-    y_true = y.loc[oof_prob.index[oof_prob.notna()]]
-    y_prob = oof_prob.dropna()
+    # ---- Build per-sample prediction table (OOF) ----
+    valid_mask = oof_prob.notna()
+    valid_idx = oof_prob.index[valid_mask]
+    y_true = y.loc[valid_idx]
+    y_prob = oof_prob.loc[valid_idx]
+
+    pred_df = pd.DataFrame({
+        "sample_id": valid_idx.astype(str),
+        "y_true": y_true.values,
+        "y_prob": y_prob.values,
+    })
+    pred_df.to_csv(os.path.join(outdir, "cv_predictions.csv"), index=False)
+
+    # ---- ROC / PR curve points as CSV ----
+    fpr, tpr, _ = roc_curve(y_true, y_prob)
+    prec, rec, _ = precision_recall_curve(y_true, y_prob)
+
+    pd.DataFrame({"fpr": fpr, "tpr": tpr}).to_csv(
+        os.path.join(outdir, "roc_curve.csv"), index=False
+    )
+    pd.DataFrame({"recall": rec, "precision": prec}).to_csv(
+        os.path.join(outdir, "pr_curve.csv"), index=False
+    )
+
+    # ---- Plots (single-model, as before) ----
     title = f"Nested CV — model={model_name}"
-    subtitle = f"n={len(y_true)} | pos={int(y_true.sum())} ({y_true.mean():.2%}) | folds={n_splits_outer}x{n_splits_inner}"
+    subtitle = (
+        f"n={len(y_true)} | pos={int(y_true.sum())} "
+        f"({y_true.mean():.2%}) | folds={n_splits_outer}x{n_splits_inner}"
+    )
 
-    plot_roc(y_true, y_prob, os.path.join(outdir, "roc.png"), title, subtitle)
-    plot_pr(y_true, y_prob, os.path.join(outdir, "pr.png"), title, subtitle)
-    brier = plot_calibration(y_true, y_prob, os.path.join(outdir, "calibration.png"), title, subtitle)
+    plot_roc(
+        y_true, y_prob,
+        os.path.join(outdir, "roc.png"),
+        title, subtitle
+    )
+    plot_pr(
+        y_true, y_prob,
+        os.path.join(outdir, "pr.png"),
+        title, subtitle
+    )
+    brier = plot_calibration(
+        y_true, y_prob,
+        os.path.join(outdir, "calibration.png"),
+        title, subtitle
+    )
 
-    # Feature stability (currently disabled because per_fold_coefs not filled)
+    # Optional feature stability across folds (still off by default)
     coef_summary = pd.DataFrame()
     if per_fold_coefs:
         allc = pd.concat(per_fold_coefs, ignore_index=True)
-        coef_summary = (allc
-                        .groupby("feature")["weight"]
-                        .agg(["mean", "std"])
-                        .reset_index())
+        coef_summary = (
+            allc.groupby("feature")["weight"]
+                .agg(["mean", "std"])
+                .reset_index()
+        )
         coef_summary["abs_mean"] = coef_summary["mean"].abs()
         coef_summary.to_csv(os.path.join(outdir, "importances.csv"), index=False)
         plot_feature_importance_with_errorbars(
-            coef_summary, os.path.join(outdir, "importances.png"),
-            title="Top features (mean ± SD across folds)", subtitle=subtitle
+            coef_summary,
+            os.path.join(outdir, "importances.png"),
+            title="Top features (mean ± SD across folds)",
+            subtitle=subtitle,
         )
 
     return {
         "metrics_path": os.path.join(outdir, "cv_metrics.csv"),
+        "predictions_path": os.path.join(outdir, "cv_predictions.csv"),
+        "roc_curve_path": os.path.join(outdir, "roc_curve.csv"),
+        "pr_curve_path": os.path.join(outdir, "pr_curve.csv"),
         "roc_path": os.path.join(outdir, "roc.png"),
         "pr_path": os.path.join(outdir, "pr.png"),
         "calibration_path": os.path.join(outdir, "calibration.png"),
         "brier": brier,
-        "importances_path": os.path.join(outdir, "importances.csv") if not coef_summary.empty else ""
+        "importances_path": os.path.join(outdir, "importances.csv")
+        if not coef_summary.empty
+        else "",
     }
-
 
 def run_permutation_test(
     X: pd.DataFrame,

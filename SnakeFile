@@ -34,8 +34,8 @@ COLORS_YAML  = CFG.get("colors_yaml", "config/colors.yml")
 DA_CFG         = CFG.get("da", {})
 DA_OUTDIR      = DA_CFG.get("outdir", "results/da")
 DA_LEVELS      = DA_CFG.get("levels", ["species", "genus"])
-DA_ALPHA       = float(DA_CFG.get("alpha", 0.10))
-DA_VOLC_METRIC = DA_CFG.get("volcano_metric", "p")
+DA_ALPHA       = float(DA_CFG.get("alpha", 0.05))
+DA_VOLC_METRIC = DA_CFG.get("volcano_metric", "q")
 DA_PREV_IDS    = DA_CFG.get("oral_healthy_prev_ids", None)
 DA_DELTAS      = DA_CFG.get("deltas_csv", None)
 
@@ -84,6 +84,8 @@ MATCHED_PAIRS_OUT = "data/processed/matched_pairs.csv"
 
 # Helper for alpha/beta: previous + HMP oral healthy
 ALPHA_ORAL_HEALTHY_MERGED = "data/processed/oral_abund_healthy_merged_for_alpha.csv"
+# Merged oral healthy for BETA (filtered version; no HMP)
+BETA_ORAL_HEALTHY_MERGED  = "data/processed/oral_abund_healthy_merged_for_beta.csv"
 
 # ----------------------- FILTERED OUTPUTS -----------------------
 ORAL_NORM_OUT          = "data/filtered/oral_abund_crohn_filtered_normalized.csv"
@@ -114,7 +116,7 @@ FLAG_BETA    = [f"results/beta/{lvl}/.done"  for lvl in LEVELS]
 FLAG_TAXA    = "results/taxa_compare/.done"
 FLAG_QC      = [f"results/qc/{lvl}/.done"    for lvl in LEVELS]
 FLAG_DA      = [f"{DA_OUTDIR}/{lvl}/.done"   for lvl in DA_LEVELS]
-
+ML_SUMMARY_FLAG = "ml_summary/.done"
 # ML done-flags
 ML_WITHIN_FLAGS = [
     f"{ML_OUTDIR}/within/{site}/{target}/{model}/{level}/.done"
@@ -141,9 +143,13 @@ rule all:
     DA is last in the chain and already depends on taxa_compare, which depends on beta, etc.
     """
     input:
+        FLAG_FILTER,
+        FLAG_ALPHA,
+        FLAG_BETA,
+        FLAG_TAXA,
+        FLAG_QC,
         FLAG_DA,
-        FLAG_QC
-
+        # ML_SUMMARY_FLAG
 # ----------------------- STAGE 1: PREPROCESSING -----------------------
 rule preprocessing:
     """
@@ -195,22 +201,24 @@ rule merge_oral_healthy_for_alpha:
         out  = pd.concat([prev, hmp], axis=1).fillna(0.0)
         out.to_csv(output.merged)
 
-# ---------------- STAGE 1c: pooled DA table (OC + OH + HMP + FC + FH) ----------------
+# ---------------- STAGE 1c: pooled DA table (OC + OH + FC + FH, FILTERED) ----------------
 rule da_build_pct_all:
     """
     Build pooled percent-abundance table (da_pct_all) and a source-map
-    used by DA, QC, and ML.
+    used by DA, QC, and ML **after prevalence filtering**.
+    Uses the filtered+normalized cohort matrices.
     """
     input:
-        oc  = ORAL_CROHN_OUT,
-        oh  = ORAL_HEALTHY_OUT,
-        fc  = FECAL_CROHN_OUT,
-        fh  = FECAL_HEALTHY_OUT,
-        hmp = HMP_ORAL_PREPROC
+        oc_filt  = ORAL_NORM_OUT,
+        oh_filt  = ORAL_HEALTHY_NORM_OUT,
+        fc_filt  = FECAL_NORM_OUT,
+        fh_filt  = FECAL_HEALTHY_NORM_OUT,
+        # make sure filtering has completed
+        flag     = FLAG_FILTER
     output:
         pct  = DA_PCT_ALL,
         src  = DA_SOURCE_MAP,
-        flag = touch(FLAG_PCTALL)
+        flag2 = touch(FLAG_PCTALL)
     run:
         import os, pandas as pd
         os.makedirs(os.path.dirname(output.pct), exist_ok=True)
@@ -219,14 +227,14 @@ rule da_build_pct_all:
             df = pd.read_csv(p, index_col=0)
             return df.apply(pd.to_numeric, errors="coerce")
 
-        oc  = _load(input.oc)
-        oh  = _load(input.oh)
-        hmp = _load(input.hmp)
-        fc  = _load(input.fc)
-        fh  = _load(input.fh)
+        # filtered + normalized tables
+        oc  = _load(input.oc_filt)
+        oh  = _load(input.oh_filt)
+        fc  = _load(input.fc_filt)
+        fh  = _load(input.fh_filt)
 
-        # main pooled table
-        out = pd.concat([oc, oh, hmp, fc, fh], axis=1).fillna(0.0)
+        # pooled percent table restricted to filtered taxa
+        out = pd.concat([oc, oh, fc, fh], axis=1).fillna(0.0)
         out = out.groupby(out.index).sum()
         out.to_csv(output.pct)
 
@@ -243,11 +251,10 @@ rule da_build_pct_all:
                     }
                 )
 
-        add_rows(oc.columns,  "Oral",  1, "Oral_Crohn")
-        add_rows(fc.columns,  "Fecal", 1, "Fecal_Crohn")
-        add_rows(oh.columns,  "Oral",  0, "Oral_Healthy_prev")
-        add_rows(hmp.columns, "Oral",  0, "Oral_Healthy_HMP")
-        add_rows(fh.columns,  "Fecal", 0, "Fecal_Healthy")
+        add_rows(oc.columns, "Oral",  1, "Oral_Crohn")
+        add_rows(fc.columns, "Fecal", 1, "Fecal_Crohn")
+        add_rows(oh.columns, "Oral",  0, "Oral_Healthy_prev")
+        add_rows(fh.columns, "Fecal", 0, "Fecal_Healthy")
 
         src = pd.DataFrame(rows).drop_duplicates("Sample_ID")
         src.to_csv(output.src, index=False)
@@ -264,7 +271,7 @@ rule filtering:
         healthy_oral   = ORAL_HEALTHY_OUT,
         healthy_fecal  = FECAL_HEALTHY_OUT,
         hmp_oral       = HMP_ORAL_PREPROC,
-        flag           = FLAG_PCTALL
+
     output:
         oral_norm          = ORAL_NORM_OUT,
         fecal_norm         = FECAL_NORM_OUT,
@@ -291,6 +298,25 @@ rule filtering:
         include_hmp_oral  = True
     script:
         f"{SCRIPTS_DIR}/filtering.py"
+# ---------------- STAGE 1b-bis: merge healthy oral (FILTERED) for beta ----------------
+rule merge_oral_healthy_for_beta:
+    """
+    Build a merged oral-healthy table for BETA diversity using the
+    prevalence-filtered + normalized healthy oral matrix.
+    (We do NOT include HMP here, to stay aligned with filtered taxa.)
+    """
+    input:
+        prev_filt = ORAL_HEALTHY_NORM_OUT,
+        flag      = FLAG_FILTER
+    output:
+        merged = BETA_ORAL_HEALTHY_MERGED
+    run:
+        import os, pandas as pd
+        os.makedirs(os.path.dirname(output.merged), exist_ok=True)
+        prev = pd.read_csv(input.prev_filt, index_col=0)
+        # For now, merged == filtered previous healthy oral
+        out = prev.copy()
+        out.to_csv(output.merged)
 
 # ----------------------- STAGE 3: ALPHA (per level) -----------------------
 rule alpha:
@@ -348,19 +374,27 @@ rule beta:
 rule beta_level:
     """
     Run beta_diversity.R per level for main, summary, and prev-new tasks.
+
+    NOTE:
+    - Uses prevalence-filtered + normalized cohort matrices for Crohn and Healthy.
+    - Oral-healthy merged for BETA is built from the filtered healthy-oral table
+      (BETA_ORAL_HEALTHY_MERGED), without HMP, to stay aligned with filtered taxa.
     """
     conda:
         "config/enviroment_r.yml"
     input:
-        oc        = ORAL_CROHN_OUT,
-        fc        = FECAL_CROHN_OUT,
-        oh_merged = ALPHA_ORAL_HEALTHY_MERGED,
-        oh_prev   = ORAL_HEALTHY_OUT,
-        fh        = FECAL_HEALTHY_OUT,
+        # FILTERED + normalized Crohn/Healthy tables
+        oc        = ORAL_NORM_OUT,
+        fc        = FECAL_NORM_OUT,
+        oh_merged = BETA_ORAL_HEALTHY_MERGED,
+        oh_prev   = ORAL_HEALTHY_NORM_OUT,
+        fh        = FECAL_HEALTHY_NORM_OUT,
         covars    = META_TABLE_POOLED,
         pairs     = MATCHED_PAIRS_OUT,
         colors    = COLORS_YAML,
+        # still require alpha .done flags if you want beta logically after alpha
         flag      = [f"results/alpha/{lvl}/.done" for lvl in LEVELS]
+
     output:
         done = touch("results/beta/{level}/.done")
     params:
@@ -410,15 +444,17 @@ rule taxa_compare:
     """
     Taxa comparison summaries/plots (descriptive only).
     Runs AFTER Beta diversity is complete.
+    Now uses the filtered+normalized cohort matrices.
     """
     input:
         script    = CFG["taxa_compare"]["script"],
-        oc        = CFG["inputs"]["oral_crohn"],
-        oh        = CFG["inputs"]["oral_healthy"],
-        fc        = CFG["inputs"]["fecal_crohn"],
-        fh        = CFG["inputs"]["fecal_healthy"],
+        oc        = ORAL_NORM_OUT,
+        oh        = ORAL_HEALTHY_NORM_OUT,
+        fc        = FECAL_NORM_OUT,
+        fh        = FECAL_HEALTHY_NORM_OUT,
         pairs     = CFG["inputs"]["pairs_csv"],
         beta_done = [f"results/beta/{lvl}/.done" for lvl in LEVELS]
+
     output:
         genus_flag   = "results/taxa_compare/genus/group_means_genus.csv",
         species_flag = "results/taxa_compare/species/group_means_species.csv",
@@ -686,10 +722,29 @@ rule ml_within_site_model_level:
           --permutation {params.perm} \
           > "{log}" 2>&1
         """
+# ----------------------- ML: summary (combined plots) -----------------------
+rule ml_summary:
+    """
+    Build combined ROC/PR plots and summary CSVs for all ML runs
+    (within-site + transfer) using the cv_predictions / external_predictions CSVs.
+    """
+    input:
+        ML_WITHIN_FLAGS,
+        ML_TRANSFER_FLAGS
+    output:
+        flag = touch(ML_SUMMARY_FLAG)
+    log:
+        "logs/ml_summary.log"
+    shell:
+        r"""
+        set -euo pipefail
+        python scripts/ml/summary_ml_results.py > "{log}" 2>&1
+        """
 rule ml:
     """
     Aggregate target: all ML experiments (within-site + transfer).
     """
     input:
         ML_WITHIN_FLAGS,
-        ML_TRANSFER_FLAGS
+        ML_TRANSFER_FLAGS,
+        ML_SUMMARY_FLAG

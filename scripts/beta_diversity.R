@@ -279,19 +279,58 @@ pcoa_plot_from_scores <- function(scores_df, group_map_named, png_file, title_tx
 }
 pcoa_plot_paired_from_scores <- function(scores_df, pairs_df, png_file, title_txt,
                                          color_oral="#B499E5", color_fecal="#78688E"){
-  if (is.null(scores_df) || nrow(scores_df)<3 || nrow(pairs_df)==0){
-    g <- ggplot() + theme_void() + annotate("text",0,0,label="No adjusted paired data", size=5)
-    ggsave(png_file, g, width=6.4, height=5.2, dpi=300, bg="white"); return(invisible(NULL))
+  if (is.null(scores_df) || nrow(scores_df) < 3 || nrow(pairs_df) == 0) {
+    g <- ggplot() + theme_void() +
+      annotate("text", 0, 0, label = "No adjusted paired data", size = 5)
+    ggsave(png_file, g, width = 6.4, height = 5.2, dpi = 300, bg = "white")
+    return(invisible(NULL))
   }
-  df <- tibble(Sample_ID=scores_df$Sample_ID, Axis1=scores_df[[1]], Axis2=scores_df[[2]])
-  seg <- pairs_df %>% inner_join(df, by=c("oral"="Sample_ID")) %>% rename(o1=Axis1,o2=Axis2) %>%
-         inner_join(df, by=c("fecal"="Sample_ID")) %>% rename(f1=Axis1,f2=Axis2)
+
+  df <- tibble(
+    Sample_ID = scores_df$Sample_ID,
+    Axis1     = scores_df[[1]],
+    Axis2     = scores_df[[2]]
+  )
+
+  seg <- pairs_df %>%
+    inner_join(df, by = c("oral" = "Sample_ID"))  %>% rename(o1 = Axis1, o2 = Axis2) %>%
+    inner_join(df, by = c("fecal" = "Sample_ID")) %>% rename(f1 = Axis1, f2 = Axis2)
+
+  # Build point data with Group + counts
+  pts <- bind_rows(
+    df %>%
+      filter(Sample_ID %in% pairs_df$oral)  %>%
+      mutate(Group = "Crohn-Oral"),
+    df %>%
+      filter(Sample_ID %in% pairs_df$fecal) %>%
+      mutate(Group = "Crohn-Fecal")
+  )
+
+  pal <- c("Crohn-Oral" = color_oral,
+           "Crohn-Fecal" = color_fecal)
+
+  labinfo <- legend_labels_with_n(pts$Group, pal)
+
   g <- ggplot() +
-    geom_segment(data=seg, aes(x=o1,y=o2,xend=f1,yend=f2), color="grey60", linewidth=.6, alpha=.7) +
-    geom_point(data=df %>% filter(Sample_ID %in% pairs_df$oral),  aes(Axis1,Axis2), color=color_oral, size=2.3) +
-    geom_point(data=df %>% filter(Sample_ID %in% pairs_df$fecal), aes(Axis1,Axis2), color=color_fecal, size=2.3) +
-    theme_bw(base_size=12) + coord_equal() + labs(title=title_txt, x="Adjusted axis 1", y="Adjusted axis 2")
-  ggsave(png_file, g, width=6.4, height=5.2, dpi=300, bg="white")
+    geom_segment(data = seg,
+                 aes(x = o1, y = o2, xend = f1, yend = f2),
+                 color = "grey60", linewidth = 0.6, alpha = 0.7) +
+    geom_point(data = pts,
+               aes(Axis1, Axis2, color = Group),
+               size = 2.3) +
+    scale_color_manual(
+      values = labinfo$palette,
+      breaks = labinfo$levels,
+      labels = unname(unlist(labinfo$labels)),
+      drop   = FALSE
+    ) +
+    theme_bw(base_size = 12) +
+    coord_equal() +
+    labs(title = title_txt,
+         x = "Adjusted axis 1",
+         y = "Adjusted axis 2")
+
+  ggsave(png_file, g, width = 6.4, height = 5.2, dpi = 300, bg = "white")
 }
 
 capscale_residual_scores <- function(D, md, covars_use){

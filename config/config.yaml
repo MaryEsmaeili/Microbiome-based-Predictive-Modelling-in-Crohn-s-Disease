@@ -59,13 +59,13 @@ inputs:
 
 da:
   pct_all: "data/processed/da_pct_all.csv"
-  meta: "data/meta/model_table_pooled.csv"         # بیرون از Snakemake تولید می‌شود
-  source_map: "data/processed/da_pct_all_sources.csv" # الزامی
-  pairs: "data/processed/matched_pairs.csv"   # اگر داری
-  deltas: ""      # اگر از قبل داری (بهتر طبق یادداشت 115)
+  meta: "data/meta/model_table_pooled.csv"
+  source_map: "data/processed/da_pct_all_sources.csv"
+  pairs: "data/processed/matched_pairs.csv"
+  deltas: ""      
   outdir: "results/da"
-  alpha: 0.10
-  volcano_metric: "p"
+  alpha: 0.05
+  volcano_metric: "q"
   heat_topk: 10
   label_topk: 10
   paired_min_pairs: 5
