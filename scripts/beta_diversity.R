@@ -1,26 +1,13 @@
-#!/usr/bin/env Rscript
-# =============================================================================
-# beta_diversity.R
+# scripts/beta_diversity.py
+# 
+# Beta-diversity analysis for the microbiome project.
+# 
+# This script reads species/genus abundance tables and covariate metadata,
+# builds Bray/Jaccard/Aitchison distance matrices, and runs PCoA plots for
+# different groups (oral vs fecal, Crohn vs healthy, paired samples).
+# It also runs PERMANOVA and PERMDISP to test disease, site and covariate
+# effects, and writes summary CSV files and figures for use in the thesis.
 #
-# Unified script for beta-diversity analyses and summaries.
-# Tasks:
-#   1) --task main
-#        - PCoA plots WITHOUT covariates and WITH covariate-adjustment
-#        - Site-wise CH (Crohn vs Healthy) plots: Oral and Fecal
-#        - Crohn paired Oral↔Fecal plots (with and without covariates)
-#        - PERMANOVA (site-specific, with/without covariates) + interaction tests
-#        - PERMDISP (Bray) and group-distance summaries
-#   2) --task summarize
-#        - Summarize PERMANOVA/PERMDISP outputs into CSV + overview plots
-#   3) --task oral_prevnew
-#        - PCoA for Oral (Crohn vs Healthy-Previous vs Healthy-New) and
-#          the same with Crohn-Fecal added (Bray)
-#
-# Notes:
-#   - This file merges and harmonizes three previous scripts into one CLI.
-#   - All comments are in English.
-#   - Robust to missing files; writes small "note" CSVs when data are absent.
-# =============================================================================
 
 suppressPackageStartupMessages({
   # Core data + IO

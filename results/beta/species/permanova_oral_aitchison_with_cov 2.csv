@@ -1,0 +1,12 @@
+term,Df,SumOfSqs,R2,F,p,covars_used
+disease,1,1792.2256835088338,0.038108044415048385,1.8271330743420904,0.029,"Age, Sex, BMI, Smoking, Antibiotics_3m, Immuno_ongoing, Steroids_ongoing, PPI_use"
+Age,1,1041.1414096531735,0.02213776057696679,1.0614198435769064,0.347,"Age, Sex, BMI, Smoking, Antibiotics_3m, Immuno_ongoing, Steroids_ongoing, PPI_use"
+Sex,1,920.1363118901936,0.019564832578875094,0.9380579152655779,0.428,"Age, Sex, BMI, Smoking, Antibiotics_3m, Immuno_ongoing, Steroids_ongoing, PPI_use"
+BMI,1,661.1631423847721,0.014058293342981025,0.6740406948203471,0.883,"Age, Sex, BMI, Smoking, Antibiotics_3m, Immuno_ongoing, Steroids_ongoing, PPI_use"
+Smoking,1,919.3309395704855,0.019547707969841482,0.9372368566142939,0.488,"Age, Sex, BMI, Smoking, Antibiotics_3m, Immuno_ongoing, Steroids_ongoing, PPI_use"
+Antibiotics_3m,1,739.3599932173529,0.015720990787875786,0.7537605949312971,0.773,"Age, Sex, BMI, Smoking, Antibiotics_3m, Immuno_ongoing, Steroids_ongoing, PPI_use"
+Immuno_ongoing,1,729.0169563988966,0.015501067086251033,0.7432161055659061,0.768,"Age, Sex, BMI, Smoking, Antibiotics_3m, Immuno_ongoing, Steroids_ongoing, PPI_use"
+Steroids_ongoing,1,617.6134052282723,0.013132296503914192,0.629642734301357,0.931,"Age, Sex, BMI, Smoking, Antibiotics_3m, Immuno_ongoing, Steroids_ongoing, PPI_use"
+PPI_use,1,938.0301939962228,0.019945309691957843,0.9563003186219982,0.458,"Age, Sex, BMI, Smoking, Antibiotics_3m, Immuno_ongoing, Steroids_ongoing, PPI_use"
+Residual,38,37274.00972031477,0.7925562227005655,NA,NA,"Age, Sex, BMI, Smoking, Antibiotics_3m, Immuno_ongoing, Steroids_ongoing, PPI_use"
+Total,47,47030.11427164986,1,NA,NA,"Age, Sex, BMI, Smoking, Antibiotics_3m, Immuno_ongoing, Steroids_ongoing, PPI_use"

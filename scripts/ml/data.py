@@ -1,4 +1,119 @@
-# ml/data.py
+# scripts/ml/data.py
+
+"""
+Data loading and label construction utilities for microbiome ML tasks.
+
+This module builds analysis-ready feature matrices (X), binary labels (y),
+aligned metadata, and optional group labels from taxa tables and pooled
+metadata, with special handling for:
+  - disease vs healthy classification,
+  - PPI-use classification,
+  - treatment responder vs non-responder tasks in Crohn’s disease.
+
+High-level behaviour
+--------------------
+The main entry point is load_X_y(), which:
+
+  1. Reads a taxa-by-sample table (taxa_csv)
+     - Columns = taxa/features, rows = samples (auto-flips if needed).
+     - Index must be sample IDs that can be matched to metadata.
+
+  2. Builds metadata depending on the chosen target:
+     - target == "disease" or "ppi":
+         * Uses pooled metadata (model_table_pooled.csv) via _build_pooled_meta().
+         * Optionally merges in a source-map (da_pct_all_sources.csv) to obtain
+           site_fallback, disease_fallback, cohort labels and harmonised IDs.
+     - target == "responder":
+         * Uses crohn_metadata.csv via _build_crohn_responder_meta().
+         * Creates one row per sample (oral and/or fecal) per Crohn subject,
+           with shared subject-level responder status.
+
+  3. Aligns taxa and metadata:
+     - Automatically detects whether samples are in rows or columns by comparing
+       row/column labels to metadata index.
+     - Restricts both tables to the intersection of sample IDs.
+     - Raises a detailed error if there is no overlap.
+
+  4. Optional site filtering:
+     - site parameter can be "oral", "fecal" or None.
+     - For responder tasks, uses the explicit "site" column from the
+       crohn_metadata-derived table.
+     - For pooled tasks, prefers "site_fallback" from the source-map, otherwise
+       auto-detects a site column (e.g. "site", "body_site").
+     - Maps common synonyms to canonical "oral"/"fecal" labels and filters rows.
+
+  5. Target construction:
+     - target == "disease":
+         * Prefer disease_fallback if present; otherwise auto-detect a disease
+           column (e.g. "disease", "disease_status", "diagnosis").
+         * Requires binary 0/1 values, dropping any samples with invalid labels.
+     - target == "ppi":
+         * Auto-detects the PPI column (e.g. "PPI_use", "ppi_status").
+         * Keeps only samples with interpretable 0/1 usage indicators.
+     - target == "responder":
+         * Uses "Responder" from crohn_metadata; coerce to 0/1 and drop invalids.
+
+  6. Feature construction:
+     - Compositional taxa features are transformed with _safe_log_clr():
+         * If values look like percentages, they are converted to proportions.
+         * A small pseudocount is added.
+         * Centered log-ratio (CLR) is applied per sample.
+     - Optional covariates (add_covars):
+         * _select_covars() collects requested covariate columns from metadata.
+         * Numeric columns are used as-is.
+         * Non-numeric columns are one-hot encoded via _one_hot().
+         * All covariate columns are coerced to numeric and NaNs filled with 0.
+     - Final feature matrix X is an early-fusion concatenation:
+         [CLR taxa features | covariates]
+
+  7. Group labels for CV:
+     - If subject_id_col exists in metadata (default "subject_id"), its values
+       are returned as a "groups" Series aligned to X, suitable for group-aware
+       cross-validation (e.g. StratifiedGroupKFold).
+     - If missing, groups is returned as None.
+
+  8. Sanity checks:
+     - If filtering leaves zero samples, raises a detailed error message
+       summarising shapes and, if available, site value counts.
+
+Key helpers
+-----------
+- _detect_sample_id_col(): heuristically find the sample ID column in metadata.
+- _set_index_from_sample_id(): set metadata index to the detected sample ID.
+- _as_str_lower(): robustly normalise Series to lowercased strings.
+- _binary_from_disease_col(): generic mapping from disease labels to 0/1.
+- _safe_log_clr(): CLR transform with pseudocount, assuming rows = samples.
+- _one_hot(): safe one-hot encoding for selected metadata columns.
+- _select_covars(): build numeric covariate matrix (continuous + one-hot).
+- _detect_col(): generic fuzzy matching for key metadata columns.
+- _build_crohn_responder_meta(): expand crohn_metadata.csv to per-sample rows
+  for responder modelling (oral/fecal per subject).
+- _build_pooled_meta(): merge pooled covariate table with source-map for
+  disease/PPI tasks and harmonised site/disease labels.
+- _ensure_col(): enforce presence or auto-detection of required metadata
+  columns with informative error messages.
+
+CLI usage
+---------
+The module also provides a small command-line wrapper (main()) which:
+
+  - Parses arguments:
+      * --taxa, --meta, --site, --target, --add-covars, --rank
+      * --out-X, --out-y, --out-meta, --out-groups
+  - Calls load_X_y() with the requested settings.
+  - Writes:
+      * out-X      : feature matrix (X)
+      * out-y      : label vector (column 'y')
+      * out-meta   : aligned metadata table
+      * out-groups : optional subject-level group labels (or empty structure)
+
+Overall, this file defines the standard data-ingestion and preprocessing
+pipeline feeding the ML scripts: it handles ID harmonisation, site/disease/PPI
+labelling, CLR transformation of compositional taxa, inclusion of clinical
+covariates, and construction of subject-level group labels in a robust and
+reusable way.
+"""
+
 import os
 import json
 import argparse

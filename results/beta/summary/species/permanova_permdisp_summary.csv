@@ -1,0 +1,13 @@
+where,metric,mode,term,F,R2,p,level
+site=oral,Bray,nocov,disease,2.7282346550014203,0.05598878503022874,0.004,species
+site=fecal,Bray,nocov,disease,25.317698734192057,0.1550211577215393,0.001,species
+site=oral,Bray,with_cov,disease,3.2187477735584755,0.06583827622151973,0.004,species
+site=fecal,Bray,with_cov,disease,11.612911270759582,0.07019124407283973,0.001,species
+site=oral,Aitchison,nocov,disease,2.2987080371347717,0.04759357197230603,0.004,species
+site=fecal,Aitchison,nocov,disease,18.001102534420326,0.1153908673847259,0.001,species
+site=oral,Aitchison,with_cov,disease,1.8271330743420904,0.03810804441504838,0.029,species
+site=fecal,Aitchison,with_cov,disease,7.193531506602192,0.04582171291550814,0.001,species
+interaction(oral×fecal),Bray,nocov,disease:site,5.63645478485003,0.02611218847049402,0.001,species
+interaction(oral×fecal),Bray,with_cov,disease:site,5.57232301542647,0.02606598861229296,0.001,species
+interaction(oral×fecal),Aitchison,nocov,disease:site,1.9347634212613585,0.00937109490035737,0.108,species
+interaction(oral×fecal),Aitchison,with_cov,disease:site,1.7415008367197071,0.00849282941508083,0.139,species

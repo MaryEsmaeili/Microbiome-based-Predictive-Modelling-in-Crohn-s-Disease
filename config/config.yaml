@@ -1,5 +1,8 @@
 project_name: "oral_microbiome_all_in_one"
 
+# ---------------------------------------------------------
+# RAW INPUTS
+# ---------------------------------------------------------
 raw_inputs:
   metadata_xlsx:     "data/Metadata_metagenomics.xlsx"
   crohn_merged_tsv:  "data/utrecht_metaphlan_merged.txt"
@@ -7,6 +10,9 @@ raw_inputs:
   healthy_fecal_tsv: "data/fecal_only_results_metaphlan4.txt"
   hmp_oral_csv:      "data/HMP_oral_metaphlan_species_table.csv"
 
+# ---------------------------------------------------------
+# PREPROCESSED TABLES
+# ---------------------------------------------------------
 preprocessed:
   oral_crohn:    "data/processed/oral_abund_crohn.csv"
   fecal_crohn:   "data/processed/fecal_abund_crohn.csv"
@@ -15,41 +21,57 @@ preprocessed:
   hmp_oral:      "data/processed/hmporal.csv"
   matched_pairs: "data/processed/matched_pairs.csv"
 
+# ---------------------------------------------------------
+# FILTERED TABLES (PREVALENCE / ABUNDANCE FILTERING)
+# ---------------------------------------------------------
 filtered:
   oral_norm:          "data/filtered/oral_abund_crohn_filtered_normalized.csv"
   fecal_norm:         "data/filtered/fecal_abund_crohn_filtered_normalized.csv"
   oral_healthy_norm:  "data/filtered/oral_abund_healthy_filtered_normalized.csv"
   fecal_healthy_norm: "data/filtered/fecal_abund_healthy_filtered_normalized.csv"
 
+# ---------------------------------------------------------
+# COLOR CONFIGURATION
+# ---------------------------------------------------------
 colors_yaml: "config/colors.yml"
 
+# ---------------------------------------------------------
+# FILTERING PARAMETERS
+# ---------------------------------------------------------
 filtering:
-  level: "species"
-  agg: "mean"
-  prevalence_oral:  0.20
-  prevalence_fecal: 0.20
-  abundance_percent_min: 0.10
-  mean_on_positives: false
+  level: "species"              # taxonomic level for filtering logic
+  agg: "mean"                   # aggregation type across samples
+  prevalence_oral:  0.20        # minimum fraction of oral samples with non-zero abundance
+  prevalence_fecal: 0.20        # minimum fraction of fecal samples with non-zero abundance
+  abundance_percent_min: 0.10   # minimum mean relative abundance (percentage) to keep a taxon
+  mean_on_positives: false      # if true, compute mean only over non-zero samples
 
+# ---------------------------------------------------------
+# ALPHA DIVERSITY
+# ---------------------------------------------------------
 alpha:
   levels: ["species", "genus"]
 
   scenarios:
-    merged: true
-    previous: true
+    merged: true      # use merged oral healthy (prev + HMP) for alpha
+    previous: true    # keep previous-only oral healthy scenario as well
 
   covars_path: "data/meta/model_table_pooled.csv"
 
+# ---------------------------------------------------------
+# TAXA COMPARISON (DESCRIPTIVE)
+# ---------------------------------------------------------
 taxa_compare:
   script: "scripts/taxa_comparison.py"
   outdir: "results/taxa_compare"
-  topk: 15
-  heat_topk: 20
-  presence_threshold: 0.40        # 0 تا 1 (فراوانی غیرصفر در هر گروه)
-  min_mean_pct: 0.10              # فیلتر میانگین ٪ (pp) روی همه‌ی نمونه‌ها
-  effect_size_threshold: 0.40     # آستانه |Δ mean %| (pp)
-  max_rows: null                 # یا یک عدد مثل 60
-  emit_legacy_pages: false       # true اگر صفحات چندگانه‌ی قدیمی هم بخوای
+  topk: 15                 # number of taxa to show in main barplots
+  heat_topk: 20            # number of taxa to show in heatmaps
+  presence_threshold: 0.40 # minimum fraction of samples with non-zero abundance per group (0–1)
+  min_mean_pct: 0.10       # minimum mean relative abundance (percentage points) to keep a taxon
+  effect_size_threshold: 0.40  # minimum |Δ mean %| (percentage points) to consider a large effect
+  max_rows: null           # maximum number of taxa in summary CSV; null = no cap
+  emit_legacy_pages: false # if true, also emit legacy multi-page figures
+
 inputs:
   oral_crohn:    "data/processed/oral_abund_crohn.csv"
   oral_healthy:  "data/processed/oral_abund_healthy_merged_for_alpha.csv"
@@ -57,29 +79,39 @@ inputs:
   fecal_healthy: "data/processed/fecal_abund_healthy.csv"
   pairs_csv:     "data/processed/matched_pairs.csv"
 
+# ---------------------------------------------------------
+# DIFFERENTIAL ABUNDANCE (DA)
+# ---------------------------------------------------------
 da:
-  pct_all: "data/processed/da_pct_all.csv"
-  meta: "data/meta/model_table_pooled.csv"
-  source_map: "data/processed/da_pct_all_sources.csv"
-  pairs: "data/processed/matched_pairs.csv"
-  deltas: ""      
-  outdir: "results/da"
-  alpha: 0.05
-  volcano_metric: "q"
-  heat_topk: 10
-  label_topk: 10
-  paired_min_pairs: 5
-  plot_jitter: 0.0
+  pct_all:   "data/processed/da_pct_all.csv"          # pooled percent-abundance table
+  meta:      "data/meta/model_table_pooled.csv"       # pooled metadata for covariates
+  source_map:"data/processed/da_pct_all_sources.csv"  # site/disease/cohort labels
+  pairs:     "data/processed/matched_pairs.csv"       # paired oral–fecal mapping
+  deltas:    ""                                       # optional precomputed deltas
+  outdir:    "results/da"
 
+  alpha: 0.05                 # significance threshold for DA tests
+  volcano_metric: "q"         # metric to use on volcano plots (e.g. "q" or "p")
+  heat_topk: 10               # number of taxa in DA heatmaps
+  label_topk: 10              # number of taxa explicitly labelled in plots
+  paired_min_pairs: 5         # minimum number of pairs required for paired tests
+  plot_jitter: 0.0            # jitter for points in scatter/jitter plots (0 = none)
+
+# ---------------------------------------------------------
+# QC (PCA / RESIDUALIZATION)
+# ---------------------------------------------------------
 qc:
-  prevalence: 0.50
-  mean_pct: 0.50
-  cap: 30
+  prevalence: 0.50  # minimum prevalence within each QC subset
+  mean_pct:  0.50   # minimum mean relative abundance (percentage points) for QC taxa
+  cap:       30     # maximum number of taxa used in QC plots
 
+# ---------------------------------------------------------
+# MACHINE LEARNING
+# ---------------------------------------------------------
 ml:
-  outdir: "results/ml"
-  levels: ["species","genus"]
-  models: ["logit", "svm", "rf", "xgb"]
-  outer_folds: 5
-  inner_folds: 4
-  permutations: 0
+  outdir: "results/ml"                # base directory for ML outputs
+  levels: ["species", "genus"]        # taxonomic levels for ML feature matrices
+  models: ["logit", "svm", "rf", "xgb"]  # models to train (must match cv_utils/train.py)
+  outer_folds: 5                      # outer folds for nested CV
+  inner_folds: 4                      # inner folds for hyperparameter search
+  permutations: 0                     # number of label permutations for null AUC (0 = disabled)

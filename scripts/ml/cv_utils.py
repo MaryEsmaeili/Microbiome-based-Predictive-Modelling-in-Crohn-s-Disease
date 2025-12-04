@@ -1,4 +1,133 @@
-# ml/cv_utils.py
+# scripts/ml/cv_utils.py
+"""
+Cross-validated model utilities for binary microbiome classification.
+
+This module centralizes model construction, nested cross-validation, permutation
+testing, and learning-curve generation for the ML part of the project
+(e.g. disease vs healthy, PPI use, treatment response, transfer tasks).
+
+Supported models
+----------------
+get_model_and_grid(model_name) returns a (Pipeline, param_grid) pair for:
+
+  - "logit"  : LogisticRegression (saga), with grids for pure L2 and elastic-net
+               penalties (C and l1_ratio).
+  - "svm"    : SVC (probability=True), with grids over C, kernel, and gamma.
+  - "rf"     : RandomForestClassifier (class_weight="balanced"), with grids over
+               n_estimators, max_depth, and min_samples_leaf.
+  - "xgb"    : XGBClassifier (if xgboost is installed), with grids over
+               max_depth, learning_rate, subsample, colsample_bytree, reg_lambda.
+
+All models are wrapped in a Pipeline with:
+  - ColumnTransformer → SimpleImputer(median) + StandardScaler for all columns
+  - "clf" final estimator (logit / svm / rf / xgb)
+
+This makes it possible to use a uniform interface for GridSearchCV and
+downstream access via best_estimator_.named_steps["clf"].
+
+Nested cross-validation
+-----------------------
+nested_cv_evaluate(
+    X, y, model_name, outdir,
+    groups=None,
+    strat_labels=None,
+    n_splits_outer=5,
+    n_splits_inner=4,
+    random_state=42,
+    min_pos_per_fold=1
+) -> Dict[str, Any]
+
+Functionality:
+  - Optionally uses StratifiedGroupKFold for the OUTER loop when non-trivial
+    groups are provided; otherwise falls back to StratifiedKFold.
+  - Uses 'strat_labels' for stratification if given (e.g. combined disease +
+    site/batch labels), while 'y' remains the true target.
+  - Inner CV: GridSearchCV with StratifiedKFold(n_splits_inner) and ROC-AUC as
+    the scoring metric.
+  - For each outer fold:
+      * Fit the inner grid on training data.
+      * Select best estimator, compute fold-level probabilities on test data.
+      * Rescale decision_function outputs to [0,1] if needed.
+      * Store out-of-fold (OOF) probabilities for all samples.
+      * Compute per-fold metrics at a fixed 0.5 threshold:
+          - roc_auc, average_precision, accuracy, balanced_accuracy,
+            precision, recall, f1.
+
+Outputs (saved to 'outdir'):
+  - "cv_metrics.csv"      : one row per outer fold with the metrics above.
+  - "cv_predictions.csv"  : per-sample OOF predictions:
+                              * sample_id, y_true, y_prob
+  - "roc_curve.csv"       : points for ROC curve (fpr, tpr).
+  - "pr_curve.csv"        : points for PR curve (recall, precision).
+  - "roc.png"             : ROC curve plot (AUC reported in legend).
+  - "pr.png"              : Precision–recall curve plot (AP in legend).
+  - "calibration.png"     : calibration curve plot (Brier score in legend).
+  - "importances.csv"     : (optional) coefficient/feature_importance summary
+                            if per-fold coefficients are aggregated.
+  - "importances.png"     : (optional) bar plot of top features with mean ± SD
+                            across folds.
+
+The function returns a dict of key paths and the final Brier score for the
+aggregated OOF predictions.
+
+Plot helpers
+------------
+The module includes small plotting helpers that produce publication-ready,
+compact figures:
+
+  - plot_roc(y_true, y_prob, out_png, title, subtitle)
+  - plot_pr(y_true, y_prob, out_png, title, subtitle)
+  - plot_calibration(y_true, y_prob, out_png, title, subtitle) -> brier
+  - plot_feature_importance_with_errorbars(coef_df, out_png, title, subtitle)
+
+All plots share a consistent layout/use of _decorate() for left-aligned titles
+and light grids, and are suitable for direct inclusion in reports.
+
+Permutation testing
+-------------------
+run_permutation_test(
+    X, y, model_name, outdir,
+    n_perm=200,
+    random_state=7
+) -> pd.DataFrame
+
+Implements a label-permutation test for ROC-AUC:
+
+  - For each permutation:
+      * Shuffle labels (keeping X fixed).
+      * Run a single (non-nested) CV with StratifiedKFold (5 folds).
+      * Within each fold, use GridSearchCV(3-fold) with ROC-AUC as scoring.
+      * Aggregate OOF predictions and compute ROC-AUC against the TRUE y.
+  - Saves "permutation_auc.csv" with columns ['perm', 'auc'] in outdir.
+  - Returns the same DataFrame for downstream p-value estimation or plotting.
+
+Learning curves
+---------------
+save_learning_curve(
+    X, y, model_name,
+    out_png, out_csv,
+    cv_splits=5,
+    random_state=42
+)
+
+Computes and plots a learning curve (train size vs CV ROC-AUC):
+
+  - Uses StratifiedKFold(cv_splits) as CV.
+  - Uses a single "reasonable" base_estimator from get_model_and_grid
+    (no inner grid search, to keep runtime manageable).
+  - For logistic-type models, sets clf__l1_ratio=0.5 as a default.
+  - Saves:
+      * out_csv : table with columns:
+          - train_size, train_auc_mean, train_auc_std,
+            cv_auc_mean, cv_auc_std
+      * out_png : line plot of cv_auc_mean vs train_size with ±1 SD band.
+
+Overall, this module provides the core reusable components for robust
+cross-validated model evaluation, calibration, and learning-curve diagnostics
+for all binary classification tasks in the project.
+"""
+
+
 import os
 import math
 import numpy as np

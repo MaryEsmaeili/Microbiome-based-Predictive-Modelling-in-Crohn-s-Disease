@@ -1,25 +1,16 @@
-#############################################
-# Main microbiome pipeline Snakefile
-#
-# Stages (in order, enforced by .done flags):
-# 1) Preprocessing (build cohort matrices + matched pairs)
-# 2) Merge oral-healthy (prev + HMP) for raw alpha/beta
-# 3) Build pooled percent table (da_pct_all + source-map)
-# 4) Filtering (per-group filtering + QC plots)
-# 5) Alpha diversity (per taxonomic level)
-# 6) Beta diversity (per taxonomic level, R script)
-# 7) Taxa Compare (descriptive taxa comparison; AFTER Beta)
-# 8) QC (PCA / densities / boxplots incl. PPI track)
-# 9) Differential Abundance (unadjusted, adjusted, paired)
-# 10) Machine Learning (within-site + transfer oral↔fecal)
-#
-# Run whole pipeline (except ML):
-#   snakemake -c4
-#
-# ML targets:
-#   snakemake ml_within
-#   snakemake ml_transfer
-#############################################
+"""
+Snakemake workflow for the Crohn's disease oral–fecal microbiome project.
+
+This pipeline:
+  1. Preprocesses raw metagenomic abundance tables and metadata.
+  2. Applies prevalence/abundance filtering and builds pooled percent tables.
+  3. Computes alpha and beta diversity, QC PCA, and descriptive taxa comparisons.
+  4. Runs differential abundance analyses (unadjusted, adjusted, paired).
+  5. Trains machine-learning models (within-site and transfer) and
+     generates combined ML summaries including consensus feature importances.
+
+All core paths and options are configured via config/config.yaml.
+"""
 
 configfile: "config/config.yaml"
 
@@ -116,7 +107,7 @@ FLAG_BETA    = [f"results/beta/{lvl}/.done"  for lvl in LEVELS]
 FLAG_TAXA    = "results/taxa_compare/.done"
 FLAG_QC      = [f"results/qc/{lvl}/.done"    for lvl in LEVELS]
 FLAG_DA      = [f"{DA_OUTDIR}/{lvl}/.done"   for lvl in DA_LEVELS]
-ML_SUMMARY_FLAG = "ml_summary/.done"
+ML_SUMMARY_FLAG = f"{ML_OUTDIR}/ml_summary/.done"
 # ML done-flags
 ML_WITHIN_FLAGS = [
     f"{ML_OUTDIR}/within/{site}/{target}/{model}/{level}/.done"
@@ -139,8 +130,9 @@ ML_TRANSFER_FLAGS = [
 # ----------------------- DEFAULT TARGET -----------------------
 rule all:
     """
-    Default target: DA (per level) + QC done flags.
-    DA is last in the chain and already depends on taxa_compare, which depends on beta, etc.
+    Default target: diversity, QC, DA, and ML summaries.
+    DA is last in the diversity chain and already depends on taxa_compare,
+    which depends on beta, etc. ML summary depends on all ML runs.
     """
     input:
         FLAG_FILTER,
@@ -149,7 +141,8 @@ rule all:
         FLAG_TAXA,
         FLAG_QC,
         FLAG_DA,
-        # ML_SUMMARY_FLAG
+        ML_SUMMARY_FLAG
+
 # ----------------------- STAGE 1: PREPROCESSING -----------------------
 rule preprocessing:
     """
@@ -694,11 +687,15 @@ rule ml_within_site_model_level:
         outer  = ML_OUTER,
         inner  = ML_INNER,
         perm   = ML_PERM,
-        # برای disease و ppi از مدل‌تیبل‌پولد، برای responder از crohn_metadata
+        # For disease and ppi we use pooled metadata (model_table_pooled);
+        # for responder we use crohn_metadata.
         meta   = lambda wc: CROHN_META if wc.target == "responder" else META_TABLE_POOLED,
-        # برای disease و ppi source-map لازم داریم؛ برای responder نه
-        source_arg = lambda wc: f'--source-map "{DA_SOURCE_MAP}"'
-                                if wc.target in ["disease", "ppi"] else ""
+        # For disease and ppi we need the source-map; for responder we do not.
+        source_arg = (
+            lambda wc: f'--source-map "{DA_SOURCE_MAP}"'
+            if wc.target in ["disease", "ppi"] else ""
+        )
+
     shell:
         r"""
         set -euo pipefail
@@ -725,8 +722,9 @@ rule ml_within_site_model_level:
 # ----------------------- ML: summary (combined plots) -----------------------
 rule ml_summary:
     """
-    Build combined ROC/PR plots and summary CSVs for all ML runs
-    (within-site + transfer) using the cv_predictions / external_predictions CSVs.
+    Build combined ROC/PR plots, calibration curves, learning curves, and
+    consensus feature importance summaries for all ML runs (within-site and
+    transfer) using the cv_predictions / external_predictions / importances CSVs.
     """
     input:
         ML_WITHIN_FLAGS,
@@ -740,9 +738,10 @@ rule ml_summary:
         set -euo pipefail
         python scripts/ml/summary_ml_results.py > "{log}" 2>&1
         """
+
 rule ml:
     """
-    Aggregate target: all ML experiments (within-site + transfer).
+    Aggregate target: all ML experiments (within-site + transfer + summary).
     """
     input:
         ML_WITHIN_FLAGS,

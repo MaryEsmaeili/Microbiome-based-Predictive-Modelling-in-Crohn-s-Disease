@@ -1,5 +1,13 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+# scripts/alpha_diversity.py
+"""
+Alpha-diversity analysis for the microbiome pipeline.
+
+This script reads genus/species abundance tables and covariate metadata,
+computes basic alpha-diversity metrics (Shannon, Richness, Evenness),
+runs simple group comparisons and OLS models, and writes all summary
+tables and plots for oral and fecal samples in Crohn’s disease and
+healthy controls.
+"""
 
 from __future__ import annotations
 

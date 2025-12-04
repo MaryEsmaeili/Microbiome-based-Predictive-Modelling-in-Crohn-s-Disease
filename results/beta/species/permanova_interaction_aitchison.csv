@@ -1,0 +1,15 @@
+term,Df,SumOfSqs,R2,F,p,covars_used,mode
+disease:site,1,210.64775565165473,0.009371094900357374,1.9347634212613585,0.108,,nocov
+Residual,155,16875.656096868024,0.7507479692832059,NA,NA,,nocov
+Total,158,22478.457201796296,1,NA,NA,,nocov
+Age,1,81.82923301269875,0.00364034027238131,0.7464715609428212,0.555,"Age, Sex, BMI, Smoking, Antibiotics_3m, Immuno_ongoing, Steroids_ongoing, PPI_use",with_cov
+Sex,1,76.72855452307704,0.0034134261899853835,0.6999415948923692,0.555,"Age, Sex, BMI, Smoking, Antibiotics_3m, Immuno_ongoing, Steroids_ongoing, PPI_use",with_cov
+BMI,1,31.045090197549143,0.0013811041353437848,0.28320291033130984,0.897,"Age, Sex, BMI, Smoking, Antibiotics_3m, Immuno_ongoing, Steroids_ongoing, PPI_use",with_cov
+Smoking,1,172.5425885794375,0.007675908850437,1.5739868343385308,0.189,"Age, Sex, BMI, Smoking, Antibiotics_3m, Immuno_ongoing, Steroids_ongoing, PPI_use",with_cov
+Antibiotics_3m,1,228.05306825346088,0.010145405719180618,2.0803705909175827,0.084,"Age, Sex, BMI, Smoking, Antibiotics_3m, Immuno_ongoing, Steroids_ongoing, PPI_use",with_cov
+Immuno_ongoing,1,32.637591409060406,0.0014519497986922464,0.29773019870239437,0.88,"Age, Sex, BMI, Smoking, Antibiotics_3m, Immuno_ongoing, Steroids_ongoing, PPI_use",with_cov
+Steroids_ongoing,1,104.07147562974569,0.004629831784960275,0.9493721742559067,0.426,"Age, Sex, BMI, Smoking, Antibiotics_3m, Immuno_ongoing, Steroids_ongoing, PPI_use",with_cov
+PPI_use,1,57.69912019601361,0.0025668630047885476,0.5263492120360185,0.69,"Age, Sex, BMI, Smoking, Antibiotics_3m, Immuno_ongoing, Steroids_ongoing, PPI_use",with_cov
+disease:site,1,190.90570252905127,0.008492829415080836,1.7415008367197073,0.139,"Age, Sex, BMI, Smoking, Antibiotics_3m, Immuno_ongoing, Steroids_ongoing, PPI_use",with_cov
+Residual,147,16114.340963872455,0.7168793133447222,NA,NA,"Age, Sex, BMI, Smoking, Antibiotics_3m, Immuno_ongoing, Steroids_ongoing, PPI_use",with_cov
+Total,158,22478.457201796296,1,NA,NA,"Age, Sex, BMI, Smoking, Antibiotics_3m, Immuno_ongoing, Steroids_ongoing, PPI_use",with_cov

@@ -1,0 +1,5 @@
+[Alpha]
+Level: genus
+Alpha rows (RAW): 256
+Matched rows (WITH covariates): 188
+Missing in covariates: 68

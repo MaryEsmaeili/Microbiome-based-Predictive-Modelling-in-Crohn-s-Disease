@@ -1,10 +1,54 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+# scripts/filtering.py
 """
-Filtering & QC (pooled-mask per site) — includes optional merge of HMP Oral into Healthy Oral.
+Filtering and pooled-mask module for site-specific abundance tables.
 
-Canonical groups:
-    Oral_Crohn, Fecal_Crohn, Oral_Healthy, Fecal_Healthy
+This script is designed to be run *only* via Snakemake as part of the
+microbiome pipeline. It takes site- and group-specific MetaPhlAn tables
+(oral/fecal, Crohn/healthy, optional HMP oral) and performs:
+
+  1) Taxonomic collapsing
+     - Collapses clade names to the requested level (genus or species)
+       using MetaPhlAn-style prefixes (g__, s__, t__).
+     - Works separately for each group:
+         * Fecal_Crohn
+         * Oral_Crohn
+         * Fecal_Healthy
+         * Oral_Healthy (+ optional HMP oral)
+
+  2) Pooled masking per site
+     - For each site (oral, fecal), builds a pooled table of Crohn + healthy.
+     - Automatically detects scale (percent vs fraction) and converts the
+       user-specified abundance parameter accordingly.
+     - Applies a joint prevalence + abundance filter:
+         * prevalence >= prevalence_oral / prevalence_fecal
+         * max abundance >= abundance_param (in detected scale)
+     - Keeps only taxa that pass this pooled mask in BOTH Crohn and healthy
+       within the same site.
+
+  3) Normalization and exports
+     - Normalizes filtered tables to percent per sample.
+     - Writes four CSV outputs with index_label="clade_name":
+         * oral_norm (Crohn)
+         * healthy_oral_norm
+         * fecal_norm (Crohn)
+         * healthy_fecal_norm
+
+  4) QC plots and text report
+     - Barplot: number of taxa before vs after masking per group.
+     - Zero-inflation distributions (by sample, by taxon).
+     - Retained mass per sample (% of original library size).
+     - Rank-abundance curves (oral and fecal; before vs after).
+     - Prevalence–mean scatter plots (oral and fecal) with mask thresholds.
+     - A human-readable text report summarizing:
+         * level, aggregation mode
+         * prevalence and abundance thresholds
+         * detected scale for each site
+         * rows_before / rows_after per site
+         * HMP oral merge statistics.
+
+All plotting colors are taken from config/colors.yml (group section) with
+a fallback to Matplotlib defaults. The script does not expose a CLI and
+raises a RuntimeError if executed outside Snakemake.
 """
 
 import os, io, tempfile

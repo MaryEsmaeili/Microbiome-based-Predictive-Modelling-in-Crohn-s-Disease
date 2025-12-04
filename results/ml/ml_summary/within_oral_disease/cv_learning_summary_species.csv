@@ -1,0 +1,5 @@
+model,max_train_size,final_cv_auc
+logit,92.0,0.9966666666666668
+rf,92.0,0.96
+svm,92.0,0.955
+xgb,92.0,0.9816666666666668

@@ -1,4 +1,62 @@
-#!/usr/bin/env python3
+# scripts/qc_unified.py
+
+"""
+Unified Quality-Control, PCA, and PERMANOVA module for microbiome analysis.
+
+This script implements the full QC workflow used in the project:
+  - loading and harmonizing metadata
+  - global filtering of taxa based on prevalence and mean abundance
+  - CLR transformation of percent-abundance tables
+  - optional covariate residualization (age, sex, BMI, antibiotics_3m,
+    smoking, PPI use, disease, site)
+  - PCA visualization of CLR matrices (with/without covariate adjustment)
+  - PERMANOVA testing for site, disease, and PPI effects
+  - selection of top-variance taxa for Oral and Fecal sites
+  - generation of multiple diagnostic plots:
+        * density curves (KDE)
+        * disease/PPI boxplots
+        * interaction plots (disease × site, or PPI-users vs healthy baseline)
+        * Crohn paired Oral→Fecal spaghetti plots
+
+Three analysis modes are supported:
+  1) NOCOV        – raw CLR values, fallback metadata allowed
+  2) WITHCOV      – CLR residualized against covariates, keeping site+disease
+  3) PPI_WITHCOV  – CLR residualized for PPI-focused subsets (Crohn PPI-users
+                    ± healthy baseline)
+
+Inputs
+------
+--pct-all : CSV
+    Percent-abundance table (taxa × samples). Values in [0–100] or [0–1].
+--meta : CSV
+    Metadata table with sample identifiers and covariates.
+--pairs : CSV (optional)
+    Mapping of Oral/Fecal sample IDs for Crohn paired analyses.
+--rank : {"genus", "species"}
+    Used for subfolder naming only.
+--outdir : str
+    Base directory for all QC outputs.
+--modes : list
+    Which analysis modes to run (default: all).
+--colors-yaml : YAML
+    ColorDot palette defining visual colors for oral/fecal groups.
+
+Outputs
+-------
+For each mode, the script writes:
+  - PCA scatter plots
+  - PERMANOVA summary (TSV)
+  - density plots for top taxa
+  - site- and disease/PPI-specific boxplots
+  - interaction plots
+  - paired Crohn spaghetti plots
+  - CSVs documenting selected taxa, sample counts and mode-specific subsets
+
+This module is a core component of the microbiome pipeline, ensuring that
+all QC, PCA, and distance-based statistical analyses are performed in a
+standardized and reproducible manner.
+"""
+
 import os, argparse, re
 from typing import Optional, List, Tuple, Dict
 import numpy as np
@@ -12,9 +70,9 @@ from numpy.random import default_rng
 import statsmodels.api as sm
 import yaml
 import matplotlib.colors as mcolors
-# ------------------------------------------------
+
 # Color palette helpers (ColorDot YAML)
-# ------------------------------------------------
+
 
 PALETTE: Dict[str, str] = {}  # will be filled in main()
 
@@ -227,8 +285,7 @@ def pca_scatter(M: pd.DataFrame, meta_idx: pd.DataFrame, out_png: str,
     """
     Simple PCA (via SVD) on CLR matrix and scatter by site/disease.
 
-    Parameters
-    ----------
+    Parameters:
     M : DataFrame
         Samples x taxa CLR matrix (rows: Sample_ID).
     meta_idx : DataFrame
@@ -294,8 +351,7 @@ def permanova_one_factor(M: pd.DataFrame, meta_idx: pd.DataFrame, factor: str,
     """
     One-factor PERMANOVA using Euclidean distance on CLR matrix.
 
-    Parameters
-    ----------
+    Parameters:
     M : DataFrame
         Samples x taxa CLR matrix (rows: Sample_ID).
     meta_idx : DataFrame
@@ -395,8 +451,7 @@ def residualize(clr: pd.DataFrame, meta: pd.DataFrame, keep_cols: List[str]) -> 
       - Return residuals of that model (so variation due to these covariates is removed).
       - Covariates listed in `keep_cols` are *not* regressed out.
 
-    Parameters
-    ----------
+    Parameters:
     clr : DataFrame
         Taxa x samples CLR matrix.
     meta : DataFrame
@@ -404,8 +459,7 @@ def residualize(clr: pd.DataFrame, meta: pd.DataFrame, keep_cols: List[str]) -> 
     keep_cols : list
         Covariate names that should NOT be removed (kept in the residual).
 
-    Returns
-    -------
+    Returns:
     DataFrame with same shape as `clr`, containing residual CLR values.
     """
     if "sample_id" not in meta.columns:
@@ -824,9 +878,8 @@ def main():
     base = os.path.join(args.outdir, args.rank)
     ensure_dir(base)
 
-    # ------------------------------------------------------------
+
     # Load percent table and convert from proportions if needed
-    # ------------------------------------------------------------
     pct = pd.read_csv(args.pct_all, index_col=0)
     pct.columns = pct.columns.astype(str)
 
@@ -835,13 +888,10 @@ def main():
     if nz.size and np.nanmedian(nz) <= 1.0:
         pct = pct * 100.0
 
-    # ------------------------------------------------------------
     # Load / normalize metadata and align with pct columns
-    # ------------------------------------------------------------
-    # ------------------------------------------------------------
+
     # Load / normalize metadata (for WITHCOV/PPI)
     # and optional fallback labels for NOCOV
-    # ------------------------------------------------------------
     meta = normalize_meta(args.meta)  # full metadata table (can have NaNs)
 
     # Optional fallback site/disease labels for NOCOV
@@ -875,9 +925,7 @@ def main():
         print("[QC] Empty percent table.")
         return
 
-    # ------------------------------------------------------------
     # Global taxa filtering by prevalence & mean abundance
-    # ------------------------------------------------------------
     keep = prevalence_mean_filter(pct, args.prevalence, args.mean_pct)
     if len(keep) == 0:
         # Nothing passes global filter → create placeholders and a dummy PERMANOVA file
@@ -893,9 +941,7 @@ def main():
     # CLR on filtered taxa
     clr_all = clr_on_percent(pct.loc[keep])
 
-    # ------------------------------------------------------------
     # Build analysis tracks (NOCOV, WITHCOV, PPI_WITHCOV)
-    # ------------------------------------------------------------
     tracks = []
 
     # disease/site tracks (with/without covariate adjustment)
@@ -931,9 +977,7 @@ def main():
             mm.set_index("sample_id").loc[common].reset_index()
         ))
 
-    # ------------------------------------------------------------
     # Run each track
-    # ------------------------------------------------------------
     for mode, kind, keep_cols, _skip_cov, *opt in tracks:
         suffix = f"_{mode}"
 
@@ -975,9 +1019,8 @@ def main():
             common = clr.columns.intersection(meta_use["sample_id"])
             clr = clr.loc[:, common]
             meta_use = meta_use[meta_use["sample_id"].isin(common)]
-        # --------------------------------------------------------
+
         # Residualization mode
-        # --------------------------------------------------------
         if mode == "NOCOV":
             # No covariates removed
             adj = clr
@@ -998,9 +1041,7 @@ def main():
             else:
                 meta_use = meta_use.reset_index().rename(columns={"index": "sample_id"})
 
-        # --------------------------------------------------------
         # Site-specific top taxa selection by variance
-        # --------------------------------------------------------
         site_series = meta_use.set_index("sample_id")["site"]
         top = select_top_by_site(adj, site_series, args.cap)
 
@@ -1021,9 +1062,8 @@ def main():
 
         adj_use = adj.loc[taxa_union]
         long = make_long(adj_use, meta_use)
-        # --------------------------------------------------------
+
         # Sample counts: who actually went into this mode
-        # --------------------------------------------------------
         counts = long.drop_duplicates(["Sample_ID"]).copy()
 
         # Make disease integer if present
@@ -1053,9 +1093,9 @@ def main():
                 os.path.join(base, f"sample_counts_site_ppi{suffix}.csv"),
                 index=False,
             )
-        # --------------------------------------------------------
+
         # Prepare wide matrix (samples x taxa) for PCA / PERMANOVA
-        # --------------------------------------------------------
+        
         M = long.pivot_table(index="Sample_ID", columns="taxon", values="CLR")
 
         # PCA

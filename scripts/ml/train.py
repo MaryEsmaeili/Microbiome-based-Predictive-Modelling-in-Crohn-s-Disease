@@ -1,4 +1,4 @@
-# ml/train.py
+# scripts/ml/train.py
 import os
 import sys
 import argparse

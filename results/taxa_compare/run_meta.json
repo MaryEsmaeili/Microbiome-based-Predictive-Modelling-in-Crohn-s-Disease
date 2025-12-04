@@ -1,0 +1,49 @@
+{
+  "params": {
+    "topk": 15,
+    "heat_topk": 20,
+    "presence_threshold": 0.4,
+    "min_mean_pct": 0.1,
+    "effect_size_threshold": 0.4,
+    "max_rows": null
+  },
+  "n_samples": {
+    "Oral_Crohn": 41,
+    "Oral_Healthy": 74,
+    "Fecal_Crohn": 45,
+    "Fecal_Healthy": 96
+  },
+  "palette_used": {
+    "group": {
+      "Fecal_Crohn": "#AA31B3",
+      "Oral_Crohn": "#D192D8",
+      "Fecal_Healthy": "#547DD3",
+      "Oral_Healthy": "#A7BDE7",
+      "HMP": "#624097"
+    },
+    "synonyms": {
+      "Fecal_Crohn": [
+        "Crohn-Fecal",
+        "Fecal_Crohn"
+      ],
+      "Oral_Crohn": [
+        "Crohn-Oral",
+        "Oral_Crohn"
+      ],
+      "Fecal_Healthy": [
+        "Healthy-Fecal",
+        "Fecal_Healthy"
+      ],
+      "Oral_Healthy": [
+        "Healthy-Oral",
+        "Oral_Healthy"
+      ]
+    },
+    "Crohn-Oral": "#D192D8",
+    "Healthy-Oral": "#A7BDE7",
+    "Crohn-Fecal": "#AA31B3",
+    "Healthy-Fecal": "#547DD3",
+    "Other": "#999999"
+  },
+  "pairs_csv": "data/processed/matched_pairs.csv"
+}

@@ -1,5 +1,37 @@
 # scripts/da_unified_module.py
-# -*- coding: utf-8 -*-
+
+"""
+Unified differential-abundance module for the Crohn microbiome project.
+
+This script runs all DA analyses on the species/genus-level MetaPhlAn tables
+used in the thesis. It supports two main modes:
+
+- UNADJUSTED tests:
+  * Uses only the source-map (pct_all_sources.csv) for labels.
+  * Performs site-specific Mann–Whitney U tests for Crohn vs Healthy in
+    oral and fecal samples.
+  * Writes per-taxon CSVs and volcano plots for unadjusted CH effects.
+
+- ADJUSTED models:
+  * Reads full metadata, normalizes column names and encodings, and
+    merges with CLR-transformed abundance tables.
+  * Fits per-taxon OLS models (via statsmodels) with disease, site,
+    PPI_use and other covariates, plus interaction terms where supported.
+  * Produces CSV files and volcano plots for:
+      - disease effects (ALL, oral-only, fecal-only)
+      - paired oral↔fecal Crohn deltas (Wilcoxon on FC–OC)
+      - PPI main effects and disease×PPI interactions.
+
+All outputs are written under --outdir/<rank>/ as:
+  - da_*_unadj_<rank>.csv / volcano_*_unadj_<rank>.png   (unadjusted CH)
+  - da_*_adj_<rank>.csv   / volcano_*_adj_<rank>.png     (adjusted disease)
+  - da_paired_<rank>.csv  / volcano_paired_<rank>.png    (paired OC↔FC)
+  - ppi_effects*.csv      / volcano_ppi*.png             (PPI-related effects)
+
+This module is designed as the single source of truth for all DA and PPI
+results reported in the thesis.
+"""
+
 from __future__ import annotations
 import os, argparse, warnings
 import numpy as np

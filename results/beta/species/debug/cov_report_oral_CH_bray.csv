@@ -1,0 +1,9 @@
+covariate,non_na,n_levels,sd_if_numeric,title,n_samples
+Age,48,47,15.491972297734039,oral_CH_bray,115
+Sex,48,2,0.4763930673403308,oral_CH_bray,115
+BMI,48,44,4.308497603079835,oral_CH_bray,115
+Smoking,48,2,0.4375949744936837,oral_CH_bray,115
+Antibiotics_3m,48,2,0.24462302739504083,oral_CH_bray,115
+Immuno_ongoing,48,2,0.4104140790860576,oral_CH_bray,115
+Steroids_ongoing,48,2,0.5035336128708592,oral_CH_bray,115
+PPI_use,48,2,0.4763930673403308,oral_CH_bray,115

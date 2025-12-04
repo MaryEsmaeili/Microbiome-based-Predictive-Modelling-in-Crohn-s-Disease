@@ -1,18 +1,122 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Preprocessing for microbiome pipeline:
-- Read metadata Excel + merged MetaPhlAn tables (Crohn + Healthy oral/fecal + HMP oral).
-- Normalize/clean sample IDs while preserving leading zeros (no numeric casting).
-- Utrecht (Crohn): extract Sdddd from column names, resolve duplicate sample columns via KEEP-ONE (max library size).
-- Healthy: extract 6-digit IDs from headers, resolve duplicates via KEEP-ONE.
-- HMP oral: keep only SRR+6digits as sample id (strip any HMP_ prefix and _metaphlan suffix), ensure taxa x samples.
-- Keep ONLY species-level rows (contain '|s__'), drop unclassified, renormalize columns to sum=1 when needed.
-- Save split abundance tables + matched ID mapping + summary + mapping/collision logs.
-- Write all CSVs with index_label='clade_name'.
+# scripts/preprocessing.py
 
-Run only via Snakemake.
 """
+Preprocessing module for Crohn/healthy MetaPhlAn abundance tables and pairing metadata.
+
+This script is intended to be run ONLY via Snakemake (script:) as part of the
+microbiome pipeline. It prepares "analysis-ready" species-level abundance tables,
+a matched oral–fecal pairs file, and several QC / provenance logs.
+
+High-level inputs (provided by Snakemake)
+-----------------------------------------
+  * metadata (Excel)
+      - Contains at least:
+          * STUDY_ID
+          * Oral_sample_ID
+          * Fecal_sample_ID
+      - IDs are normalised with `norm_metadata_id` to create Oral_clean/Fecal_clean.
+
+  * crohn (Utrecht merged MetaPhlAn TSV)
+      - Wide table with clade_name rows and many technical column names.
+      - `parse_utrecht_merged`:
+          - Renames "#clade_name" -> "clade_name" if needed.
+          - Extracts S####-style sample IDs from column names using `norm_utrecht_colname`.
+          - Builds an id_map (original -> normalised S####) and a collisions table.
+          - Resolves duplicate mappings with a KEEP-ONE policy:
+                choose the original column with the largest library size
+                (no summation across runs).
+          - Filters to rows with non-zero total abundance.
+          - Keeps species-level clades only (rows containing "|s__"; unclassified dropped).
+          - Renormalises each column to sum ~ 1.
+
+  * healthy_oral / healthy_fecal (DAG3/healthy MetaPhlAn TSV)
+      - Parsed by `parse_metaphlan_healthy`:
+          - Drops NCBI_tax_id.
+          - Extracts a 6-digit subject/sample key from column names via `extract_healthy_id`.
+          - Applies the same KEEP-ONE duplicate policy based on library size.
+          - Filters to non-zero rows, species-only, and renormalises columns to sum ~ 1.
+
+  * hmp_oral (HMP oral CSV)
+      - First column is a "sample" identifier, remaining columns are clades.
+      - `parse_hmp_oral`:
+          - Transposes to taxa x samples.
+          - Standardises HMP sample IDs to strict "SRR######" via `standardize_hmp_sample_id`.
+          - Drops any column without a valid SRR######.
+          - Keeps species-only rows and renormalises columns to sum ~ 1.
+
+Main steps in `run_preprocess`
+------------------------------
+  1) Load and clean metadata
+     - `load_metadata` either reads a proper header row or reconstructs it
+       depending on the first row contents.
+     - Creates Oral_clean and Fecal_clean using `norm_metadata_id`.
+
+  2) Parse Utrecht Crohn table
+     - `parse_utrecht_merged` returns a species-level abundance table
+       with columns indexed by normalised S#### IDs and a mapping
+       of S#### -> original column that was kept.
+
+  3) Match oral/fecal Crohn samples
+     - For each STUDY_ID, map Oral_clean / Fecal_clean to available S#### columns.
+     - Any row where at least one side is missing is written to
+       results/preprocessing/unmatched_ids.tsv.
+     - Rows with both sides present are stored as "matched" pairs:
+          * STUDY_ID, Oral_sample_ID, Fecal_sample_ID, Oral_col, Fecal_col
+       and later saved (plus original-kept columns) to `matched_out`.
+
+     - IMPORTANT: oral_crohn and fecal_crohn tables include ALL available
+       oral/fecal IDs that could be mapped, not only the matched pairs.
+       Pairs are used later for paired OC↔FC analyses; unpaired samples
+       are still kept for site-specific analyses.
+
+  4) Healthy tables
+     - `parse_metaphlan_healthy` is applied separately to oral and fecal
+       healthy MetaPhlAn tables to produce species-only, renormalised
+       abundance matrices.
+
+  5) HMP oral
+     - `parse_hmp_oral` prepares a separate species-level table with
+       SRR###### columns. HMP is not merged here; it is merged into
+       healthy oral later in the filtering step.
+
+  6) Outputs (analysis-ready CSVs, all with index_label="clade_name")
+       * out_oral_crohn    : Crohn oral species x samples
+       * out_fecal_crohn   : Crohn fecal species x samples
+       * out_oral_healthy  : healthy oral species x samples
+       * out_fecal_healthy : healthy fecal species x samples
+       * hmp_oral_out      : HMP oral species x SRR###### samples
+
+     - Matched pairs file (`matched_out`) includes:
+         * STUDY_ID, Oral_sample_ID, Fecal_sample_ID
+         * oral / fecal S#### IDs
+         * oral_original_kept / fecal_original_kept
+           (original Utrecht columns selected under the KEEP-ONE policy)
+
+  7) QC and summary
+       * sample_qc.tsv: per-sample richness, Shannon diversity and library size.
+       * unmatched_ids.tsv: metadata rows where oral/fecal columns could not
+         both be mapped to available S#### IDs.
+       * preproc_summary (JSON): high-level counts for Crohn, healthy oral/fecal,
+         HMP oral, and notes about:
+             - duplicate resolution policy
+             - species-only feature level
+             - column renormalisation
+             - HMP ID standardisation.
+
+Key conventions enforced here
+-----------------------------
+  - Species-only feature space: rows must contain "|s__"; "unclassified" labels
+    are removed.
+  - Column-level renormalisation: each sample is renormalised so total relative
+    abundance sums to ~1.0 after cleaning.
+  - Duplicate runs / multiple columns mapping to the same biological sample
+    are NOT summed; instead, a single column is kept (highest library size),
+    and the choice is logged.
+  - HMP oral samples are kept in a separate table and only merged with
+    healthy oral downstream (in the filtering step).
+  - Running this module directly (without Snakemake) raises a RuntimeError.
+"""
+
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
 import re
@@ -294,7 +398,7 @@ def run_preprocess(metadata_file: Path,
         crohn_file, map_out=u_map_out, collisions_out=u_collisions_out
     )
 
-        # 3) match oral/fecal against available Sdddd columns
+    # 3) match oral/fecal against available Sdddd columns
     available = set(abund_utrecht.columns)
     meta["Oral_col"]  = meta["Oral_clean"].where(meta["Oral_clean"].isin(available))
     meta["Fecal_col"] = meta["Fecal_clean"].where(meta["Fecal_clean"].isin(available))
@@ -331,10 +435,10 @@ def run_preprocess(metadata_file: Path,
     oral_healthy,  _ = parse_metaphlan_healthy(healthy_oral_in,  map_out=ho_map_out, collisions_out=ho_collisions_out)
     fecal_healthy, _ = parse_metaphlan_healthy(healthy_fecal_in, map_out=hf_map_out, collisions_out=hf_collisions_out)
 
-    # 6) HMP oral (separate table; merge در مرحلهٔ filtering انجام می‌شود)
+    # 6) HMP oral 
     hmp_oral_df = parse_hmp_oral(hmp_oral_in)
 
-    # 7) save core CSVs (با هدر clade_name)
+    # 7) save core CSVs (clade_name with header)
     _write_csv(oral_crohn,    out_oral_crohn,    with_index=True)
     _write_csv(fecal_crohn,   out_fecal_crohn,   with_index=True)
     _write_csv(oral_healthy,  out_oral_healthy,  with_index=True)

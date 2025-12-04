@@ -1,0 +1,15 @@
+== Filtering report (pooled-mask per site) ==
+
+Level=species, Aggregation=mean
+Prevalence oral=0.200, fecal=0.200
+Abundance parameter=0.1 (applied per detected scale)
+
+Oral Healthy merged samples: prev=12, HMP=62, merged=74
+
+[ORAL]
+scale=fraction, rows_before_c=358, rows_before_h=476, rows_after=100
+abundance_thr_applied=0.001
+
+[FECAL]
+scale=fraction, rows_before_c=1057, rows_before_h=1345, rows_after=257
+abundance_thr_applied=0.001

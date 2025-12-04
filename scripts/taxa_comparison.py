@@ -1,40 +1,105 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+# scripts/taxa_comparison.py
+
 """
-Taxa Compare — CORE (Descriptive only) + Debug & Pairing Helpers
-================================================================
+Taxa-level descriptive comparison module for oral/fecal Crohn vs healthy groups.
 
-What this script produces (per rank = genus/species):
-  • Percent matrices per group: pct_oral_crohn.csv, pct_oral_healthy.csv,
-    pct_fecal_crohn.csv, pct_fecal_healthy.csv
-  • pct_all.csv (all four groups concatenated; taxa × samples, %)
-  • Heatmaps (paired Crohn, unpaired Oral CH, unpaired Fecal CH; FULL and compact variants)
-  • Heatmaps (ALL shared taxa, paginated)  [Option A]
-  • Slopegraphs of group means (ALL taxa, paginated)  [Option B]
-  • Delta lollipop plots (ALL taxa, paginated)        [Option C]
-  • Stacked bar charts (group means; per-sample stacks; y-axis fixed to [0,1])
-  • Compact CSVs: group_means_{rank}.csv, group_deltas_{rank}.csv
-  • run_meta.json (parameters + sample counts)
-  • Rich DEBUG outputs in outdir/debug_{rank}/ to verify row selection and group coverage
+This script implements the core descriptive taxa-comparison workflow for the
+project. It takes four abundance matrices (Oral-Crohn, Oral-Healthy,
+Fecal-Crohn, Fecal-Healthy), collapses them to genus and species level, and
+produces standardized figures and compact CSV summaries.
 
-Explicitly not included here:
-  • Any CLR-wide matrices for ML
-  • Any statistical DA tests (MWU / Wilcoxon) or volcano plots
+High-level functionality
+------------------------
+For each taxonomic rank (genus and species), the script:
 
-CLI
----
-python taxa_compare_core_debug.py \
-  --oral-crohn OC.csv --oral-healthy OH.csv \
-  --fecal-crohn FC.csv --fecal-healthy FH.csv \
-  --outdir results/taxa_compare --topk 15 --heat-topk 20 \
-  [--pairs-csv data/processed/matched_sample_ids.csv] \
-  [--presence-threshold 0.0]
+  1) Ensures all input matrices are oriented as taxa × samples, using simple
+     heuristics on the row/column names.
 
-Pairs CSV schema (if provided):
-  subject_id, oral_id, fecal_id
+  2) Collapses clade-level rows to the requested rank:
+       - genus  → extract 'g__...'
+       - species → extract 's__...'
+     and converts each matrix to percent abundances per sample.
 
-Author: ChatGPT (Maryam's assistant)
+  3) Aligns taxa across all four groups (union of indices), filling missing
+     values with 0, and writes rank-specific percent tables:
+       - pct_oral_crohn.csv
+       - pct_oral_healthy.csv
+       - pct_fecal_crohn.csv
+       - pct_fecal_healthy.csv
+       - pct_all.csv (concatenated)
+
+  4) Generates descriptive figures:
+       - Paired Crohn Oral vs Fecal heatmap (subject-level pairing optional via
+         --pairs-csv), with row-wise z-score of log1p(% abundance).
+       - Unpaired Crohn–Healthy heatmaps for oral and fecal:
+           * Healthy-Oral vs Crohn-Oral
+           * Healthy-Fecal vs Crohn-Fecal
+         using a unified filtering policy:
+           · presence_threshold (per-group non-zero frequency)
+           · min_mean_pct (abundance filter)
+           · effect_size_threshold (|Δ mean %| filter)
+           · optional max_rows cap after filtering.
+       - Stacked barplots (two-bar, group means) for Crohn vs Healthy in oral
+         and fecal, using a fixed TAXA_COLOR_CYCLE for taxa colors and a side
+         legend table with mean % per group.
+       - Lollipop plots (Δ mean % = Crohn − Healthy) for ORAL and FECAL,
+         aligned with the same filtering policy and colored via the global
+         PALETTE (Crohn-Oral / Healthy-Oral / Crohn-Fecal / Healthy-Fecal).
+
+     Optionally, legacy multi-page outputs can be emitted:
+       - Paginated ALL-shared heatmaps (no filtering) for oral/fecal CH.
+       - Paginated lollipop plots (ALL taxa) ordered by |Δ|.
+
+  5) Writes compact CSV summaries:
+       - group_means_<rank>.csv
+           · columns: O.C., F.C., O.H., F.H. (mean % per group)
+       - group_deltas_<rank>.csv
+           · columns (when available): O.C.–O.H., F.C.–F.H., and/or O.C.–F.C.
+
+Color handling
+--------------
+A YAML-based color palette is loaded from config/colors.yml (or overridden via
+the COLORS_YAML environment variable), and normalized to canonical keys such as:
+  - "Crohn-Oral", "Healthy-Oral", "Crohn-Fecal", "Healthy-Fecal", "Other"
+
+These group colors are used for:
+  - column color strips in heatmaps,
+  - bar edge colors,
+  - lollipop positive/negative deltas,
+  - header annotations and sample-count labels.
+
+Inputs (CLI)
+------------
+Required CSV files (rows = features, cols = samples; orientation auto-fixed):
+  --oral-crohn      : abundance matrix for Crohn oral samples
+  --oral-healthy    : abundance matrix for healthy oral samples
+  --fecal-crohn     : abundance matrix for Crohn fecal samples
+  --fecal-healthy   : abundance matrix for healthy fecal samples
+  --outdir          : base output directory
+
+Key options:
+  --topk                   : top-N taxa for stacked barplots & titles (default: 15)
+  --heat-topk              : page size for legacy paginated heatmaps (default: 20)
+  --pairs-csv              : optional subject pairing (subject_id, oral_id, fecal_id)
+  --presence-threshold     : per-group presence filter in [0,1] (0=any non-zero)
+  --min-mean-pct           : drop taxa with overall mean % below this threshold
+  --effect-size-threshold  : keep taxa with |Δ mean %| above this threshold
+  --max-rows               : maximum number of taxa to plot after filtering
+  --emit-legacy-pages      : also emit legacy multi-page (ALL taxa) figures
+
+Run metadata
+------------
+The script writes a run_meta.json file in --outdir with:
+  - parameter settings (topk, thresholds, max_rows, etc.)
+  - sample counts per input group
+  - the resolved PALETTE
+  - path to the pairs CSV (if used)
+
+Overall, this module provides the descriptive “Taxa Compare CORE” layer of the
+pipeline: it standardizes how oral vs fecal and Crohn vs healthy taxa patterns
+are visualized and summarized, without performing formal statistical testing.
 """
+
 from __future__ import annotations
 
 import os
