@@ -406,10 +406,10 @@ def load_X_y(
     # Build metadata depending on target
     # -----------------------------
     if target == "responder":
-        # meta_csv در این حالت crohn_metadata.csv است
+        # In this case, meta_csv is crohn_metadata.csv.
         meta = _build_crohn_responder_meta(meta_csv)
     else:
-        # disease / ppi → از مدل پولد + source-map
+        # disease / ppi → from pooled_model + source-map
         meta = _build_pooled_meta(meta_csv, source_map_csv, sample_id_col)
 
     # --- Auto-detect orientation: rows vs columns are samples ---
@@ -439,13 +439,13 @@ def load_X_y(
     site_col_eff = None
     if site is not None:
         if target == "responder":
-            # در meta ساخته شده برای responder ستون 'site' داریم
+            # We have a 'site' column in the meta created for the responder.
             site_col_eff = _ensure_col(
                 meta, "site", role="Site",
                 synonyms=["site"]
             )
         else:
-            # اگر source-map داشتیم، از site_fallback استفاده کن
+            # If we have source-map, use site_fallback
             if "site_fallback" in meta.columns:
                 site_col_eff = "site_fallback"
             else:
@@ -478,7 +478,7 @@ def load_X_y(
     # Target construction
     # -----------------------------
     if target == "disease":
-        # *** NEW: استفاده از disease_fallback اگر باشد
+        #  Using disease_fallback
         if "disease_fallback" in meta.columns:
             y_raw = meta["disease_fallback"]
         else:
@@ -494,7 +494,7 @@ def load_X_y(
         y = y_num.loc[mask].astype(int)
 
     elif target == "ppi":
-        # *** NEW: فقط نمونه‌هایی که PPI_use معلوم دارند
+        # Only samples with known PPI_use
         pcol = _ensure_col(
             meta, ppi_col, role="PPI use",
             synonyms=["ppi", "ppi_use", "ppi_status"]
@@ -507,7 +507,7 @@ def load_X_y(
         y = (y_num.loc[mask] > 0).astype(int)
 
     elif target == "responder":
-        # meta از crohn_metadata آمده و ستون 'Responder' دارد
+        # 'meta' comes from 'crohn_metadata' and has a 'Responder' column.
         if "Responder" not in meta.columns:
             raise ValueError("Responder column not found in crohn_metadata-derived meta.")
         y_raw = meta["Responder"]
