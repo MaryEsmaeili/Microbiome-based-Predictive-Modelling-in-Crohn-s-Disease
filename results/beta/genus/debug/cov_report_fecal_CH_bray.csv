@@ -1,9 +1,0 @@
-covariate,non_na,n_levels,sd_if_numeric,title,n_samples
-Age,140,81,13.620891754547714,fecal_CH_bray,141
-Sex,140,2,0.4687018217789981,fecal_CH_bray,141
-BMI,140,83,4.070111144384936,fecal_CH_bray,141
-Smoking,140,2,0.343714669304599,fecal_CH_bray,141
-Antibiotics_3m,140,2,0.2700348270332816,fecal_CH_bray,141
-Immuno_ongoing,140,2,0.28094686473004943,fecal_CH_bray,141
-Steroids_ongoing,140,2,0.39027225851407094,fecal_CH_bray,141
-PPI_use,140,2,0.3652421798596278,fecal_CH_bray,141

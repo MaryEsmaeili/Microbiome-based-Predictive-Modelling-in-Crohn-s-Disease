@@ -1,9 +1,0 @@
-covariate,non_na,n_levels,sd_if_numeric,title,n_samples
-Age,173,82,14.112298704597565,allgroups_aitchison,241
-Sex,173,2,0.46701956327638,allgroups_aitchison,241
-BMI,173,85,4.062668694213292,allgroups_aitchison,241
-Smoking,173,2,0.37970067664491064,allgroups_aitchison,241
-Antibiotics_3m,173,2,0.2643896150205534,allgroups_aitchison,241
-Immuno_ongoing,173,2,0.33412774449867005,allgroups_aitchison,241
-Steroids_ongoing,173,2,0.4461151032045038,allgroups_aitchison,241
-PPI_use,173,2,0.4112283443249418,allgroups_aitchison,241
