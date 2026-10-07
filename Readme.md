@@ -1,33 +1,62 @@
-# Oral–Gut Microbiome Divergence and Predictive Modeling in Crohn’s Disease
+# Oral–Gut Microbiome Divergence and Predictive Modeling in Crohn's Disease
 
-This repository provides a fully reproducible Snakemake workflow for processing, analyzing, and modeling paired oral–fecal metagenomic profiles in Crohn’s disease. The pipeline performs preprocessing, filtering, normalization, alpha and beta diversity analyses, unified QC, differential abundance, machine learning (nested CV and transfer learning), and ML summary aggregation, all within a structured and automated environment.
+MSc thesis project · Data Science for Life Sciences · Hanze University of Applied Sciences, in collaboration with UMCG (2025)
 
-The workflow follows a strict modular structure, ensures reproducibility through conda environments, and produces publication-ready figures and tables directly from raw MetaPhlAn4 outputs.
+A modular **Snakemake** workflow (Python + R) that takes MetaPhlAn4 taxonomic profiles from oral and fecal samples of people with Crohn's disease (CD) and healthy controls, and runs filtering, normalization, diversity analysis, differential abundance, and machine learning — including a test of whether a model trained on one body site still works on the other.
 
-## Repository Structure
+## Research questions
+
+1. How do the oral and gut (fecal) microbiomes differ between people with Crohn's disease and healthy controls?
+2. How well can microbiome profiles separate CD from controls within each body site?
+3. Does a disease classifier trained on fecal samples transfer to oral samples (and vice versa)?
+4. Can the microbiome predict proton-pump inhibitor (PPI) use or treatment response within the CD group?
+
+## Key results
+
+| Analysis | Result |
+|---|---|
+| CD vs. controls, fecal (nested CV, ROC-AUC, 4 models) | 0.995–1.00 (n = 141; 45 CD) |
+| CD vs. controls, oral (nested CV, ROC-AUC, 4 models) | 0.95–0.99 |
+| Cross-site transfer, fecal → oral (external test set, n = 115; 41 CD) | Logistic regression 0.876 · SVM 0.70 · Random forest 0.32 · XGBoost 0.43 |
+| PPI use / treatment response | Close to chance level |
+| Differential abundance, fecal (covariate-adjusted) | 204 of 351 taxa significant (q < 0.05) |
+| Differential abundance, oral (covariate-adjusted) | 0 taxa significant |
+| Fecal community composition (PERMANOVA R²) | 0.155 unadjusted → 0.070 after covariate adjustment |
+
+<p align="center">
+  <img src="results/ml/ml_summary/within_fecal_disease/cv_ROC_species.png" width="45%" alt="ROC curves, within-site fecal classification">
+  <img src="results/ml/ml_summary/transfer_fecal_to_oral/external_ROC_species.png" width="45%" alt="ROC curves, fecal-to-oral transfer">
+</p>
+
+## How to read these results (limitations)
+
+- **The near-perfect within-site AUCs are probably inflated.** CD samples and healthy-control samples come from *different source cohorts* (separate input files, plus HMP reference profiles for healthy oral samples). Disease status is therefore confounded with cohort and sequencing batch, and the models can partly learn *where a sample came from* rather than disease biology. The drop in fecal PERMANOVA R² after covariate adjustment (0.155 → 0.070) is consistent with this.
+- **Cross-site transfer depends strongly on the model.** Only logistic regression transferred reasonably (AUC 0.876, but poorly calibrated: Brier 0.34); tree-based models performed below chance on the other site.
+- PPI use and treatment response could not be predicted beyond chance with the available sample size.
+- All results come from one study population and have not been validated in an independent cohort.
+
+## Data availability
+
+The raw input data (MetaPhlAn4 profiles and clinical metadata) are **not included** in this repository. `results/` contains aggregate outputs (figures, summary tables) from the thesis run; sample identifiers in these files are pseudonymized codes. Expected input files and their paths are listed in `config/config.yaml` under `raw_inputs`.
+
+## Methods overview
+
+- **Preprocessing:** harmonize MetaPhlAn4 tables, map sample IDs, identify matched oral–fecal pairs, add HMP oral reference profiles.
+- **Filtering:** prevalence ≥ 20% per site and mean relative abundance ≥ 0.1%, with QC plots (zero fraction, prevalence vs. mean, rank-abundance).
+- **Diversity:** alpha diversity (Shannon, richness, evenness) at species and genus level; beta diversity with Bray–Curtis, Jaccard and Aitchison distances, PCoA, PERMANOVA / PERMDISP, with and without covariates (R, `vegan`).
+- **Differential abundance:** unadjusted, covariate-adjusted, and paired oral–fecal analyses.
+- **Machine learning:** CLR transformation; logistic regression, SVM, random forest and XGBoost; nested cross-validation; ROC, PR and calibration curves; learning curves; cross-site transfer evaluation on a held-out site; consensus feature importance across models.
+
+## Repository structure
 
 ```
 .
-├── Snakefile
+├── SnakeFile                 # workflow definition
 ├── config/
-│   ├── config.yaml
-│   ├── enviroment_r.yml
-│   ├── enviroment.yml
+│   ├── config.yaml           # input paths, thresholds, DA/QC/ML settings
+│   ├── environment.yml       # Python environment (microbiome_pipeline)
+│   ├── enviroment_r.yml      # R environment for beta diversity (r_vegan)
 │   └── colors.yml
-├── data/
-│   ├── raw/
-│   ├── processed/
-│   └── filtered/
-├── results/
-│   ├── preprocessing/
-│   ├── filtering/
-│   ├── alpha/
-│   ├── beta/
-│   ├── taxa_compare/
-│   ├── qc/
-│   ├── da/
-│   └── ml/
-│       └── ml_summary/
 ├── scripts/
 │   ├── preprocessing.py
 │   ├── filtering.py
@@ -40,118 +69,52 @@ The workflow follows a strict modular structure, ensures reproducibility through
 │       ├── data.py
 │       ├── train.py
 │       ├── cv_utils.py
-│       └── summary_ml_results.py/
-└──
+│       └── summary_ml_results.py
+└── results/                  # outputs of the thesis run
+    ├── alpha/  beta/  taxa_compare/  qc/  da/
+    └── ml/
+        ├── within/  transfer/
+        └── ml_summary/
 ```
 
 ## Installation
 
-Create the Python environment:
-
-```
-conda env create -f environment.yml
+```bash
+conda env create -f config/environment.yml
 conda activate microbiome_pipeline
 ```
 
-Create the R environment required for beta diversity:
+The R environment for beta diversity (`config/enviroment_r.yml`) is created automatically by Snakemake when `--use-conda` is used.
 
-```
-conda env create -f config/environment_r.yml
-```
+## Running the workflow
 
-## Configuration
+Place the input files at the paths given in `config/config.yaml`, then run:
 
-All settings, paths, filtering thresholds, DA and QC parameters, and ML configuration are controlled through:
-
-```
-config/config.yaml
+```bash
+snakemake -s SnakeFile --use-conda --cores 8
 ```
 
-## Run the Workflow
+Individual steps:
 
-Run the entire pipeline:
+| Step | Command |
+|---|---|
+| Preprocessing | `snakemake -s SnakeFile results/_flags/preprocessing.done --cores 4` |
+| Filtering | `snakemake -s SnakeFile results/_flags/filtering.done --cores 4` |
+| Alpha diversity | `snakemake -s SnakeFile alpha --cores 4` |
+| Beta diversity (R) | `snakemake -s SnakeFile beta --use-conda --cores 4` |
+| Differential abundance | `snakemake -s SnakeFile da --cores 4` |
+| Machine learning (within-site + transfer + summary) | `snakemake -s SnakeFile ml --cores 8` |
+| ML summary plots only | `snakemake -s SnakeFile ml_summary --cores 4` |
 
-```
-snakemake --cores 8
-```
+## Known issues
 
-Run selected modules:
-
-Preprocessing:
-```
-snakemake results/_flags/preprocessing.done --cores 4
-```
-
-Filtering:
-```
-snakemake results/filtering/filtering_report.txt --cores 4
-```
-
-Alpha diversity:
-```
-snakemake results/alpha/species/.done --cores 4
-```
-
-Beta diversity (R):
-```
-snakemake results/beta/species/.done --cores 4
-```
-
-Differential abundance:
-```
-snakemake results/da/species/.done --cores 4
-```
-
-Machine learning (within-site + transfer):
-```
-snakemake ml --cores 8
-```
-
-ML summary and combined plots:
-```
-snakemake ml_summary --cores 4
-```
-
-## Machine Learning
-
-The ML subsystem performs CLR transformation, feature concatenation, nested cross-validation, learning curves, transfer learning between oral and fecal sites, and consensus feature importance across all four model types (logistic regression, random forest, SVM, XGBoost). All outputs are saved to:
-
-```
-results/ml/
-results/ml/summary/
-```
-
-## Outputs
-
-The pipeline generates:
-
-- Preprocessing: harmonized abundance tables, HMP integration, ID-map logs, matched pairs.
-- Filtering: zero-count QC, prevalence vs mean plots, rank abundance curves.
-- Alpha diversity: species/genus diversity metrics, matched analyses.
-- Beta diversity: Bray and Aitchison PCoA, covariate-adjusted models, PERMANOVA/PERMDISP.
-- Taxa comparison: group means, heatmaps, volcano-style effect summaries.
-- QC: PCA (no covariates / covariate-adjusted / PPI-focused).
-- Differential abundance: unadjusted, adjusted, and paired analyses.
-- Machine learning: nested CV predictions, ROC/PR/calibration, learning curves, transfer evaluations.
-- ML summary: combined ROC, PR, calibration, learning-curve plots, and consensus feature importance.
-
-## Reproducibility
-
-The workflow follows Hanze reproducibility standards:
-- strict separation of raw, processed, filtered, and results data
-- deterministic preprocessing steps
-- locked conda environments
-- no manual editing of intermediate files
-- modular Snakemake DAG
-- all figures regenerated programmatically
+- In `summary_ml_results.py`, the transfer summary tables labelled `cv_summary` report training-CV metrics; use `external_summary_*.csv` for transfer performance (the transfer numbers above come from these files).
+- Some genus-level differential abundance and transfer outputs duplicate the species-level results and are being checked.
 
 ## Citation
 
-Esmaeili, M. (December 2025).  
-Oral–Gut Microbiome Divergence and Predictive Modeling in Crohn’s Disease.
-Hanze University of Applied Sciences & UMCG.
+Esmaeili, M. (2025). *Oral–Gut Microbiome Divergence and Predictive Modeling in Crohn's Disease.* MSc thesis, Hanze University of Applied Sciences & UMCG.
 
 ## Contact
 
-Maryam Esmaeili  
-maryam.esmaeili1985@gmail.com
+Maryam Esmaeili · maryam.esmaeili1985@gmail.com · [LinkedIn](https://www.linkedin.com/in/YOUR-PROFILE)
