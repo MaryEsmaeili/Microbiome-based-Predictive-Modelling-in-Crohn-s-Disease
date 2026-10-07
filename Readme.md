@@ -130,6 +130,4 @@ Esmaeili, M. (2025). *Oral–Gut Microbiome Divergence and Predictive Modeling i
 
 ## Contact
 
-Maryam Esmaeili · maryam.esmaeili1985@gmail.com · [LinkedIn](https://www.linkedin.com/in/maryam-esmaeili-ds
-
-)
+Maryam Esmaeili · maryam.esmaeili1985@gmail.com · [LinkedIn](https://www.linkedin.com/in/maryam-esmaeili-ds)
