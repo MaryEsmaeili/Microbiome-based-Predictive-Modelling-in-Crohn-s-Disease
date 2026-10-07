@@ -49,7 +49,7 @@ A modular **Snakemake** workflow (Python + R) that takes MetaPhlAn4 taxonomic pr
 | Healthy controls | Dutch Microbiome Project (DMP/DAG3) | 12 | 96 |
 | Healthy oral reference | Human Microbiome Project (HMP) | 62 | — |
 
-The raw input data (MetaPhlAn4 profiles and clinical metadata) are governed by UMCG/DMP/HMP data-use agreements and are **not included** in this repository; access can be requested from the respective data custodians. `results/` contains aggregate outputs (figures, summary tables) from the thesis run; sample identifiers in these files are pseudonymized codes. Expected input files and their paths are listed in `config/config.yaml` under `raw_inputs`.
+The raw input data (MetaPhlAn4 profiles and clinical metadata) are governed by UMCG/DMP/HMP data-use agreements and are **not included** in this repository; access can be requested from the respective data custodians. `results/` contains aggregate outputs (figures, summary tables) from the thesis run. Expected input files and their paths are listed in `config/config.yaml` under `raw_inputs`.
 
 ## Methods overview
 
